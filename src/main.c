@@ -10,6 +10,9 @@ void main()
 {
     if (cpuid() == 0) {
         /* @todo: Clear BSS section.*/
+        extern char *bss, *ebss;
+        memset(bss, 0, ebss - bss);
+        //
 
         smp_init();
         uart_init();

@@ -16,6 +16,8 @@ void main()
         printk_init();
 
         /* @todo: Print "Hello, world! (Core 0)" */
+        printk("Hello, world!(Core 0)\n");
+        //
 
         arch_fence();
 
@@ -27,6 +29,8 @@ void main()
         arch_fence();
 
         /* @todo: Print "Hello, world! (Core <core id>)" */
+        printk("Hello, world!(Core %lld)\n", cpuid());
+        //
     }
 
     set_return_addr(idle_entry);

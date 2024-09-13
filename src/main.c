@@ -9,9 +9,11 @@ static volatile bool boot_secondary_cpus = false;
 
 void main() {
     if (cpuid() == 0) {
-        /* @todo: Clear BSS section.*/
         extern char edata[], end[];
         memset(edata, 0, (usize)(end - edata));
+        extern char *bss, *ebss;
+        memset(bss, 0, ebss - bss);
+
 
         smp_init();
         uart_init();
@@ -20,6 +22,8 @@ void main() {
         /* initialize kernel memory allocator */
         kinit();
 
+        printk("Hello, world!(Core 0)\n");
+
         arch_fence();
 
         // Set a flag indicating that the secondary CPUs can start executing.
@@ -27,6 +31,8 @@ void main() {
     } else {
         while (!boot_secondary_cpus);
         arch_fence();
+
+        printk("Hello, world!(Core %llu)\n", cpuid());
     }
 
     set_return_addr(idle_entry);

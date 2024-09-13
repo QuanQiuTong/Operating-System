@@ -1,16 +1,16 @@
 #include <aarch64/intrinsic.h>
-#include <driver/uart.h>
-#include <kernel/printk.h>
-#include <kernel/core.h>
 #include <common/string.h>
+#include <driver/uart.h>
+#include <kernel/core.h>
+#include <kernel/printk.h>
 
 static volatile bool boot_secondary_cpus = false;
 
-void main()
-{
+void main() {
     if (cpuid() == 0) {
         /* @todo: Clear BSS section.*/
-        extern char *bss, *ebss;
+        extern char bss[], ebss[];  // DO NOT use pointers! Use array instead.
+        // printk("%p %p\n", bss, ebss);
         memset(bss, 0, ebss - bss);
         //
 

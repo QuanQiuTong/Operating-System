@@ -32,7 +32,7 @@ void main()
         arch_fence();
 
         /* @todo: Print "Hello, world! (Core <core id>)" */
-        printk("Hello, world!(Core %lld)\n", cpuid());
+        printk("Hello, world!(Core %llu)\n", cpuid());
         //
     }
 

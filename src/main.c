@@ -9,12 +9,11 @@ static volatile bool boot_secondary_cpus = false;
 
 void main() {
     if (cpuid() == 0) {
-        extern char data[], edata[], end[];
+        extern char edata[], end[];
         memset(edata, 0, (usize)(end - edata));
         extern char bss[], ebss[];
+        // printk("bss[%p %p)\n",bss,ebss);
         memset(bss, 0, ebss - bss);
-
-        printk("data is %p; edata is %p; end is %p\n", (void*)data, (void*)edata, end);
 
         smp_init();
         uart_init();

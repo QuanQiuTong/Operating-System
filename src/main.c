@@ -11,15 +11,13 @@ void main() {
     if (cpuid() == 0) {
         extern char edata[], end[];
         memset(edata, 0, (usize)(end - edata));
+
         extern char bss[], ebss[];
-        // printk("bss[%p %p)\n",bss,ebss);
         memset(bss, 0, ebss - bss);
 
         smp_init();
         uart_init();
         printk_init();
-
-        printk("Hello, world!(Core 0)\n");
 
         /* initialize kernel memory allocator */
         kinit();
@@ -32,8 +30,6 @@ void main() {
         while (!boot_secondary_cpus)
             ;
         arch_fence();
-
-        printk("Hello, world!(Core %llu)\n", cpuid());
     }
 
     set_return_addr(idle_entry);

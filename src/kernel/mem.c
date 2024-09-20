@@ -53,15 +53,17 @@ void kfree_page(void* p) {
 }
 
 typedef struct Node {
-    struct Node* next;
+    unsigned next;  // Store only the lower 32 bits of the address
     short size;
     bool free;
 } Node;
 
+#define KADDR(next) (next ? (Node*)KSPACE(next) : 0)
+
 static void merge(Node* h) {
-    Node* p = h->next;
-    if (p && p->free && PAGE_BASE((u64)h) == PAGE_BASE((u64)p)) {
-        h->next = p->next;
+    Node* p = KADDR(h->next);
+    if (p && p->free && PAGE_BASE(h) == PAGE_BASE(p)) {
+        h->next = (u64)p->next;
         h->size += p->size + sizeof(Node);
     }
     h->free = true;
@@ -74,29 +76,28 @@ void* kalloc(unsigned long long size) {
 
     Node** fr = (size & 0x7) ? free4 : free8;
     size = (size + 3) & ~0x3;
-    
+
     Node* h = fr[cpuid()];
-    for (; h; h = h->next)
+    for (; h; h = KADDR(h->next))
         if (h->free) {
             merge(h);
-            if ((unsigned long long)h->size >= size)
+            if ((u64)h->size >= size)
                 break;
         }
+
     if (h == NULL) {
         Node* p = (Node*)kalloc_page();
-        p->next = fr[cpuid()];
-        p->size = PAGE_SIZE - sizeof(Node);
-        p->free = true;
-        fr[cpuid()] = p;
-        h = p;
+        *p = (Node){(u64)fr[cpuid()], PAGE_SIZE - sizeof(Node), true};
+        h = fr[cpuid()] = p;
     }
-    if (h->size - (u64)size > sizeof(Node)) {
-        Node* p = (Node*)((u64)h + sizeof(Node) + size);
-        p->free = true;
-        p->size = h->size - (u64)size - sizeof(Node);
-        p->next = h->next;
-        h->next = p;
+
+    short sz = sizeof(Node) + size;
+    if (h->size > sz) {
+        Node* p = (Node*)((u64)h + sz);
+        *p = (Node){(u64)h->next, h->size - sz, true};
+        h->next = (u64)p;
     }
+
     h->size = size;
     h->free = false;
     release_spinlock(&memlock);

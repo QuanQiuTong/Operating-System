@@ -5,11 +5,11 @@
 #include <kernel/mem.h>
 
 #include <common/list.h>
-#include <kernel/printk.h>
+// #include <kernel/printk.h>
 
 RefCount kalloc_page_cnt;
 
-static SpinLock mm_lock, memlock[4];
+static SpinLock mm_lock;
 static char* mm_end;   // lowest untouched page address
 static ListNode list;  // deleted pages.
 
@@ -17,7 +17,6 @@ void kinit() {
     init_rc(&kalloc_page_cnt);
 
     init_spinlock(&mm_lock);
-    init_spinlock(memlock), init_spinlock(memlock + 1), init_spinlock(memlock + 2), init_spinlock(memlock + 3);
 
     extern char end[];
     mm_end = (char*)((u64)(end + 4095) & ~0xFFFull);
@@ -53,7 +52,7 @@ void kfree_page(void* p) {
 }
 
 typedef struct Node {
-    unsigned next;  // Store only the lower 32 bits of the address
+    unsigned next;  // lower 32 bits of the address
     short size;
     bool free;
 } Node;
@@ -72,8 +71,6 @@ static void merge(Node* h) {
 static Node *free8[4] = {0}, *free4[4] = {0};
 
 void* kalloc(unsigned long long size) {
-    acquire_spinlock(memlock + cpuid());
-
     Node** fr = (size & 0x7) ? free4 : free8;
     size = (size + 3) & ~0x3;
 
@@ -100,12 +97,9 @@ void* kalloc(unsigned long long size) {
 
     h->size = size;
     h->free = false;
-    release_spinlock(memlock + cpuid());
     return (void*)((u64)h + sizeof(Node));
 }
 
 void kfree(void* ptr) {
-    acquire_spinlock(memlock + cpuid());
     merge((Node*)((u64)ptr - sizeof(Node)));
-    release_spinlock(memlock + cpuid());
 }

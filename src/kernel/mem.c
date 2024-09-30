@@ -29,7 +29,7 @@ void* kalloc_page() {
     acquire_spinlock(&mm_lock);
 
     void* ret = NULL;
-    if (list.next == list.prev) {
+    if (_empty_list(&list)) {
         ret = mm_end;
         mm_end += PAGE_SIZE;
     } else {

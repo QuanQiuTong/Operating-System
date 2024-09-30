@@ -1,12 +1,13 @@
 #pragma once
 
-#include <kernel/proc.h>
 #include <common/rbtree.h>
+#include <kernel/proc.h>
 
 #define NCPU 4
 
 struct sched {
-    // TODO: customize your sched info
+    Proc* thisproc;
+    Proc* idle;
 };
 
 struct cpu {

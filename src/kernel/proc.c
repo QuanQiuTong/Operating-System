@@ -81,10 +81,25 @@ int start_proc(Proc* p, void (*entry)(u64), u64 arg) {
     p->kcontext->x1 = (u64)arg;
 
     // 3. activate the proc and return its pid
-    int id = p->pid;  // concurrency safe
     activate_proc(p);
-    return id;
+    return p->pid;
 }
+
+#define destroy_proc(p, exitcode) ({           \
+    _detach_from_list(&p->ptnode);             \
+    _detach_from_list(&p->schinfo.rq);         \
+    kfree_page(p->kstack);                     \
+                                               \
+    PidNode* pidn = kalloc(sizeof(PidNode));   \
+    pidn->id = p->pid;                         \
+    _insert_into_list(&pidpool, &pidn->lnode); \
+                                               \
+    if (exitcode != NULL)                      \
+        *exitcode = p->exitcode;               \
+    int id = p->pid;                           \
+    kfree(p);                                  \
+    id;                                        \
+})
 
 #define for_list(node) for (ListNode* p = node.next; p != &node; p = p->next)
 
@@ -101,29 +116,15 @@ int wait(int* exitcode) {
     /* printk("[%x] recieve childexit\n", (i32)(i64)this); */
 
     // 3. if any child exits, clean it up and return its pid and exitcode
-
-    acquire_sched_lock();
     int id = -1;
+    acquire_sched_lock();
     for_list(this->children) {
-        auto childproc = container_of(p, Proc, ptnode);
-        if (childproc->state != ZOMBIE)
-            continue;
-        /* printk("[%x] clean\n", (i32)(i64)childproc); */
-
-        _detach_from_list(&childproc->ptnode);
-        _detach_from_list(&childproc->schinfo.rq);
-        *exitcode = childproc->exitcode;
-        kfree_page(childproc->kstack);
-
-        id = childproc->pid;
-        PidNode* pidn = kalloc(sizeof(PidNode));
-        init_list_node(&pidn->lnode);
-        pidn->id = id;
-        _insert_into_list(&pidpool, &pidn->lnode);
-        kfree(childproc);
-        break;
+        Proc* childproc = container_of(p, Proc, ptnode);
+        if (childproc->state == ZOMBIE) {
+            id = destroy_proc(childproc, exitcode);
+            break;
+        }
     }
-
     release_sched_lock();
     return id;
 }
@@ -135,23 +136,24 @@ NO_RETURN void exit(int code) {
     this->exitcode = code;
 
     // 2. clean up the resources
+    /* Are there any resources that should be cleaned up? */
+
     // 3. transfer children to the root_proc, and notify the root_proc if there is zombie
     int zcnt = 0;
     for_list(this->children) {
         Proc* childproc = container_of(p, Proc, ptnode);
         childproc->parent = &root_proc;
         zcnt += (childproc->state == ZOMBIE);
-        /* printk("[%x] post childexit\n", (i32)(i64)childproc); */
     }
-    _merge_list(&root_proc.children, _detach_from_list(&this->children));
+    _merge_list(&root_proc.children, &this->children), _detach_from_list(&this->children); /* keep order */
 
     while (zcnt--)
-        post_sem(&root_proc.childexit);
+        post_sem(&root_proc.childexit); /* printk("[%x] post childexit\n", (i32)(i64)childproc); */
 
     post_sem(&this->parent->childexit);
 
     // 4. sched(ZOMBIE)
-    acquire_sched_lock();  // avoid double-free
+    acquire_sched_lock(); /* avoid double-free */
     sched(ZOMBIE);
 
     PANIC();  // prevent the warning of 'no_return function returns'

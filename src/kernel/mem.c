@@ -10,7 +10,7 @@
 RefCount kalloc_page_cnt;
 
 static SpinLock mm_lock;
-static char* mm_end;   // lowest untouched page address
+static char* mm_end;   // lowest allocated page address
 static ListNode list;  // deleted pages.
 
 void kinit() {
@@ -19,7 +19,7 @@ void kinit() {
     init_spinlock(&mm_lock);
 
     extern char end[];
-    mm_end = (char*)((u64)(end + 4095) & ~0xFFFull);
+    mm_end = (char*)((u64)(end - 1) & ~0xFFFull);
     init_list_node(&list);
 }
 
@@ -30,8 +30,7 @@ void* kalloc_page() {
 
     void* ret = NULL;
     if (_empty_list(&list)) {
-        ret = mm_end;
-        mm_end += PAGE_SIZE;
+        ret = mm_end += PAGE_SIZE;
     } else {
         ret = list.next;
         _detach_from_list(list.next);

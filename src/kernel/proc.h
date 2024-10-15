@@ -13,10 +13,8 @@ enum procstate { UNUSED,
                  ZOMBIE };
 
 typedef struct UserContext {
-    u64 q00, q01;
-    u64 tpidr, useless;
     u64 spsr, elr, lr, sp;
-    u64 x[32];
+    u64 x[18];
 } UserContext;
 
 typedef struct KernelContext {

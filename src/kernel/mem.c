@@ -45,6 +45,9 @@ void kfree_page(void* p) {
 
     acquire_spinlock(&mm_lock);
 
+    /*  if (p == mm_end)
+            mm_end -= PAGE_SIZE;
+        else  */
     _insert_into_list(&list, p);
 
     release_spinlock(&mm_lock);

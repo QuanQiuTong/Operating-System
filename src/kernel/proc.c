@@ -50,6 +50,7 @@ void init_proc(Proc* p) {
     init_list_node(&p->ptnode);
     p->parent = NULL;
     init_schinfo(&p->schinfo);
+    init_pgdir(&p->pgdir);
     p->kstack = kalloc_page();
     p->ucontext = (UserContext*)((u64)p->kstack + PAGE_SIZE - 16 - sizeof(UserContext));
     p->kcontext = (KernelContext*)((u64)p->ucontext - sizeof(KernelContext));
@@ -136,7 +137,7 @@ NO_RETURN void exit(int code) {
     this->exitcode = code;
 
     // 2. clean up the resources
-    /* Are there any resources that should be cleaned up? */
+    free_pgdir(&this->pgdir);
 
     // 3. transfer children to the root_proc, and notify the root_proc if there is zombie
     int zcnt = 0;
@@ -159,8 +160,29 @@ NO_RETURN void exit(int code) {
     PANIC();  // prevent the warning of 'no_return function returns'
 }
 
+static Proc* find_and_kill(int pid, Proc* now) {
+    if (now->pid == pid && !is_unused(now)) {
+        now->killed = true;
+        return now;
+    }
+    for_list(now->children) {
+        auto childproc = container_of(p, Proc, ptnode);
+        Proc* q = find_and_kill(pid, childproc);
+        if (q)
+            return q;
+    }
+    return NULL;
+}
+
 int kill(int pid) {
-    // TODO:
     // Set the killed flag of the proc to true and return 0.
     // Return -1 if the pid is invalid (proc not found).
+
+    Proc* p = find_and_kill(pid, &root_proc);
+
+    if (p){
+        activate_proc(p);
+        return 0;
+    }
+    return -1;
 }

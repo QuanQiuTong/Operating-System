@@ -78,11 +78,13 @@ bool activate_proc(Proc* p) {
             _insert_into_list(&rq, &p->schinfo.rq);
             release_sched_lock();
             return true;
-        default:
+        case ZOMBIE:
             release_sched_lock();
-            PANIC();
+            return false;
+        default: // should never reach here
     }
-    return false;  // untouched
+    release_sched_lock();
+    PANIC();
 }
 
 static void update_this_state(enum procstate new_state) {
@@ -124,6 +126,10 @@ static void update_this_proc(Proc* p) {
 void sched(enum procstate new_state) {
     Proc* this = thisproc();
     ASSERT(this->state == RUNNING);
+    if (this->killed && new_state != ZOMBIE) {
+        release_sched_lock();
+        return;
+    }
     update_this_state(new_state);
     Proc* next = pick_next();
     update_this_proc(next);

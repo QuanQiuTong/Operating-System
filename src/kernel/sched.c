@@ -12,6 +12,16 @@ extern void swtch(KernelContext* new_ctx, KernelContext** old_ctx);
 
 static SpinLock rqlock;
 static ListNode rq;  // runnable queue
+static struct timer timer[NCPU];
+
+/// @note need I expose this function to symbol table?
+static void sched_timer_handler(struct timer* t) {
+    t->data = 0;
+    acquire_sched_lock();
+    sched(RUNNABLE);
+}
+
+static const int ELAPSE = 10; // magic number
 
 void init_sched() {
     // 1. initialize the resources (e.g. locks, semaphores)
@@ -19,11 +29,12 @@ void init_sched() {
     init_list_node(&rq);
 
     // 2. initialize the scheduler info of each CPU
-    for (int i = 0; i < NCPU; i++) {
+    for (int i = 0; i < NCPU; ++i) {
         Proc* p = kalloc(sizeof(Proc));
         p->idle = true;
         p->state = RUNNING;
         cpus[i].sched = (struct sched){p, p};
+        timer[i] = (struct timer){true, ELAPSE, 0, {0}, sched_timer_handler, i};
     }
 }
 
@@ -68,20 +79,20 @@ bool activate_proc(Proc* p) {
 
     acquire_sched_lock();  // lock for rq
     switch (p->state) {
-        case RUNNING:
         case RUNNABLE:
+        case RUNNING:
+        case ZOMBIE:
             release_sched_lock();
             return false;
-        case SLEEPING:
+
         case UNUSED:
+        case SLEEPING:
             p->state = RUNNABLE;
             _insert_into_list(&rq, &p->schinfo.rq);
             release_sched_lock();
             return true;
-        case ZOMBIE:
-            release_sched_lock();
-            return false;
-        default: // should never reach here
+
+        default:  // should never reach here
     }
     release_sched_lock();
     PANIC();
@@ -118,6 +129,9 @@ static Proc* pick_next() {
 
 static void update_this_proc(Proc* p) {
     scheduler().thisproc = p;
+
+    if (timer[cpuid()].triggered)
+        set_cpu_timer(&timer[cpuid()]);
 }
 
 // A simple scheduler.

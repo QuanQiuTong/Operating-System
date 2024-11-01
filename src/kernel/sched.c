@@ -21,7 +21,9 @@ static void sched_timer_handler(struct timer* t) {
     sched(RUNNABLE);
 }
 
-static const int ELAPSE = 10; // magic number
+// magic number
+// Increasing the elapse will increase write speed (to a certain extent), but will also decrease read speed.
+static const int ELAPSE = 4; 
 
 void init_sched() {
     // 1. initialize the resources (e.g. locks, semaphores)

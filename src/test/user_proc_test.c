@@ -72,10 +72,10 @@ void user_proc_test()
         }
         ASSERT(p->pgdir.pt);
 
-        // TODO: setup the user context
-        // 1. set x0 = i
-        // 2. set elr = EXTMEM
-        // 3. set spsr = 0
+        // setup the user context
+        p->ucontext->x[0] = i;
+        p->ucontext->elr = EXTMEM;
+        p->ucontext->spsr = 0;
 
         pids[i] = start_proc(p, trap_return, 0);
         printk("pid[%d] = %d\n", i, pids[i]);

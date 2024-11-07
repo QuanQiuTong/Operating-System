@@ -140,13 +140,8 @@ static void virtio_blk_intr()
             PANIC();
         }
 
-        /**
-         * For `.buf` has type of `const u8 (*)[512]`, the following code causes a warning.
-         * `container_of(disk.virtq.info[d0].buf, Buf, data)`
-         * Thus we need to manually calculate the offset of `Buf.data` in `Buf`.
-         * This is exactly what the `container_of` macro does.
-         */
-        Buf* b = (Buf*)((char*)disk.virtq.info[d0].buf - offset_of(Buf, data));
+        Buf* b = container_of(disk.virtq.info[d0].buf, Buf, data[0]);
+        // Buf* b = (Buf*)((char*)disk.virtq.info[d0].buf - offset_of(Buf, data));
         
         /**
          * If B_DIRTY is set, write buf to disk, clear B_DIRTY, set B_VALID.

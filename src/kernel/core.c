@@ -38,19 +38,16 @@ NO_RETURN void kernel_entry() {
         u32 lba_start;     // 起始 LBA
         u32 sector_count;  // 扇区数量
     } __attribute__((packed));
-    ASSERT(sizeof(struct partition_entry) == 16);
-
-    const int part_table_offset = 0x1BE;
+    // ASSERT(sizeof(struct partition_entry) == 16);
 
     Buf b = {.flags = 0, .block_no = 0};
     if (virtio_blk_rw(&b) != 0) {
         printk("Failed to read MBR.\n");
-        while (1)
-            yield();
+        PANIC();
     }
 
-    // get second partition
-    struct partition_entry* part_table = (struct partition_entry*)(b.data + part_table_offset);
+#define part_table_offset 0x1BE
+    auto part_table = (struct partition_entry*)(b.data + part_table_offset);
 
     u32 lba_start = part_table[1].lba_start;
     u32 sector_count = part_table[1].sector_count;

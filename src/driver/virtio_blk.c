@@ -116,6 +116,8 @@ int virtio_blk_rw(Buf *b)
 
     release_spinlock(&disk.lk);
     wait_sem(&b->sem);
+    // Semaphores needn't check the condition again, so 'while' is not needed here.
+    ASSERT(b->flags & B_VALID);
     acquire_spinlock(&disk.lk);
 
     disk.virtq.info[d0].done = 0;
@@ -145,6 +147,14 @@ static void virtio_blk_intr()
          * This is exactly what the `container_of` macro does.
          */
         Buf* b = (Buf*)((char*)disk.virtq.info[d0].buf - offset_of(Buf, data));
+        
+        /**
+         * If B_DIRTY is set, write buf to disk, clear B_DIRTY, set B_VALID.
+         * Else if B_VALID is not set, read buf from disk, set B_VALID.
+         */
+        if(b->flags & B_DIRTY)
+            b->flags &= ~B_DIRTY;
+        b->flags |= B_VALID;
         post_sem(&b->sem);
 
         disk.virtq.info[d0].buf = NULL;

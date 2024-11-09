@@ -149,6 +149,7 @@ NO_RETURN void exit(int code) {
     /// @note be careful of concurrency
 
     acquire_spinlock(&plock);
+    acquire_sched_lock();
 
     Proc *this = thisproc();
     ASSERT(this != &root_proc);
@@ -158,22 +159,23 @@ NO_RETURN void exit(int code) {
     for_list(this->children) {
         Proc *childproc = container_of(p, Proc, ptnode);
         childproc->parent = &root_proc;
-        zcnt += is_zombie(childproc);
+        zcnt += (childproc->state == ZOMBIE);
     }
     if (!_empty_list(&this->children)) {
         _merge_list(&root_proc.children, this->children.next);
         _detach_from_list(&this->children);
+        release_sched_lock();
+        while (zcnt--)
+            post_sem(&root_proc.childexit);
+        acquire_sched_lock();
     }
-    while (zcnt--)
-        post_sem(&root_proc.childexit);
 
-    acquire_sched_lock();
     free_pgdir(&this->pgdir);
     release_sched_lock();
 
     post_sem(&this->parent->childexit);
-    release_spinlock(&plock);
     acquire_sched_lock();
+    release_spinlock(&plock);
     sched(ZOMBIE);
 
     PANIC();  // prevent the warning of 'no_return function returns'

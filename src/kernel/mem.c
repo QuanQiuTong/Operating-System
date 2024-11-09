@@ -9,26 +9,23 @@
 
 RefCount kalloc_page_cnt;
 
-static SpinLock mm_lock;
-static char* mm_end;   // lowest allocated page address
-static ListNode list;  // deleted pages.
+static SpinLock page_lock = {0};
+static ListNode list = {&list, &list};  // deleted pages.
+static char *mm_end;                    // lowest allocated page address
 
 void kinit() {
     init_rc(&kalloc_page_cnt);
 
-    init_spinlock(&mm_lock);
-
     extern char end[];
-    mm_end = (char*)((u64)(end - 1) & ~0xFFFull);
-    init_list_node(&list);
+    mm_end = (char *)((u64)(end - 1) & ~0xFFFull);
 }
 
-void* kalloc_page() {
+void *kalloc_page() {
     increment_rc(&kalloc_page_cnt);
 
-    acquire_spinlock(&mm_lock);
+    acquire_spinlock(&page_lock);
 
-    void* ret = NULL;
+    void *ret = NULL;
     if (_empty_list(&list)) {
         ret = mm_end += PAGE_SIZE;
     } else {
@@ -36,21 +33,21 @@ void* kalloc_page() {
         _detach_from_list(list.next);
     }
 
-    release_spinlock(&mm_lock);
+    release_spinlock(&page_lock);
     return ret;
 }
 
-void kfree_page(void* p) {
+void kfree_page(void *p) {
     decrement_rc(&kalloc_page_cnt);
 
-    acquire_spinlock(&mm_lock);
+    acquire_spinlock(&page_lock);
 
     /*  if (p == mm_end)
             mm_end -= PAGE_SIZE;
         else  */
     _insert_into_list(&list, p);
 
-    release_spinlock(&mm_lock);
+    release_spinlock(&page_lock);
 }
 
 typedef struct Node {
@@ -59,10 +56,10 @@ typedef struct Node {
     bool free;
 } Node;
 
-#define KADDR(next) (next ? (Node*)KSPACE(next) : 0)
+#define KADDR(next) (next ? (Node *)KSPACE(next) : 0)
 
-static void merge(Node* h) {
-    Node* p = KADDR(h->next);
+static void merge(Node *h) {
+    Node *p = KADDR(h->next);
     if (p && p->free && PAGE_BASE(h) == PAGE_BASE(p)) {
         h->next = (u64)p->next;
         h->size += p->size + sizeof(Node);
@@ -70,13 +67,16 @@ static void merge(Node* h) {
     h->free = true;
 }
 
-static Node *free8[4] = {0}, *free4[4] = {0};
+#define NCPU 4
+static Node *free8[NCPU] = {0}, *free4[NCPU] = {0};
+static SpinLock kalloc_lock[NCPU] = {0};
 
-void* kalloc(unsigned long long size) {
-    Node** fr = (size & 0x7) ? free4 : free8;
+void *kalloc(unsigned long long size) {
+    Node **fr = (size & 0x7) ? free4 : free8;
     size = (size + 3) & ~0x3;
 
-    Node* h = fr[cpuid()];
+    acquire_spinlock(&kalloc_lock[cpuid()]);
+    Node *h = fr[cpuid()];
     for (; h; h = KADDR(h->next))
         if (h->free) {
             merge(h);
@@ -85,23 +85,27 @@ void* kalloc(unsigned long long size) {
         }
 
     if (h == NULL) {
-        Node* p = (Node*)kalloc_page();
+        Node *p = kalloc_page();
         *p = (Node){(u64)fr[cpuid()], PAGE_SIZE - sizeof(Node), true};
         h = fr[cpuid()] = p;
     }
 
     short sz = sizeof(Node) + size;
     if (h->size > sz) {
-        Node* p = (Node*)((u64)h + sz);
+        Node *p = (Node *)((u64)h + sz);
         *p = (Node){(u64)h->next, h->size - sz, true};
         h->next = (u64)p;
     }
 
     h->size = size;
     h->free = false;
-    return (void*)((u64)h + sizeof(Node));
+
+    release_spinlock(&kalloc_lock[cpuid()]);
+    return (void *)((u64)h + sizeof(Node));
 }
 
-void kfree(void* ptr) {
-    merge((Node*)((u64)ptr - sizeof(Node)));
+void kfree(void *ptr) {
+    acquire_spinlock(&kalloc_lock[cpuid()]);
+    merge((Node *)((u64)ptr - sizeof(Node)));
+    release_spinlock(&kalloc_lock[cpuid()]);
 }

@@ -10,20 +10,18 @@ extern bool panic_flag;
 
 extern void swtch(KernelContext* new_ctx, KernelContext** old_ctx);
 
-static SpinLock rqlock;
-static ListNode rq;  // runnable queue
-static struct timer timer[NCPU];
+static SpinLock rqlock = {0};
+static ListNode rq = {&rq, &rq};  // runnable queue
 
-/// @note need I expose this function to symbol table?
 static void sched_timer_handler(struct timer* t) {
     t->data = 0;
     acquire_sched_lock();
     sched(RUNNABLE);
 }
 
-// magic number
 // Increasing the elapse will increase write speed (to a certain extent), but will also decrease read speed.
 static const int ELAPSE = 4; 
+static struct timer timer[NCPU] = {[0 ... NCPU - 1] = {true, ELAPSE, 0, {0}, sched_timer_handler, 0}};
 
 void init_sched() {
     // 1. initialize the resources (e.g. locks, semaphores)
@@ -96,6 +94,7 @@ bool activate_proc(Proc* p) {
 
         default:  // should never reach here
     }
+    printk("activate_proc: unexpected state %d\n", p->state);
     release_sched_lock();
     PANIC();
 }

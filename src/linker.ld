@@ -32,10 +32,8 @@ SECTIONS
       *(.data.*)
     }
     PROVIDE(edata = .);
-    PROVIDE(bss = .);
     .bss : AT(ADDR(.bss) - 0xFFFF000000000000) {
       *(.bss .bss.*) 
     }
-    PROVIDE(ebss = .);
     PROVIDE(end = .);
 }

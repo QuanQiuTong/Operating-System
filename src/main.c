@@ -1,29 +1,31 @@
 #include <aarch64/intrinsic.h>
 #include <common/string.h>
+#include <driver/gicv3.h>
+#include <driver/interrupt.h>
+#include <driver/timer.h>
 #include <driver/uart.h>
 #include <kernel/core.h>
 #include <kernel/cpu.h>
 #include <kernel/mem.h>
 #include <kernel/printk.h>
-#include <kernel/sched.h>
-#include <driver/interrupt.h>
 #include <kernel/proc.h>
-#include <driver/gicv3.h>
-#include <driver/timer.h>
+#include <kernel/sched.h>
 #include <driver/virtio.h>
 
 static volatile bool boot_secondary_cpus = false;
 
-void main()
-{
+void main() {
     if (cpuid() == 0) {
-        /* @todo: Clear BSS section.*/
         extern char edata[], end[];
         memset(edata, 0, (usize)(end - edata));
 
-        /* Initialize interrupt handler. */
+        extern char bss[], ebss[];
+        memset(bss, 0, ebss - bss);
+
+        /* initialize interrupt handler */
         init_interrupt();
 
+        smp_init();
         uart_init();
         printk_init();
 

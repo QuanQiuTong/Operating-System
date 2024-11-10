@@ -162,7 +162,7 @@ NO_RETURN void exit(int code) {
     for_list(this->children) {
         Proc *childproc = container_of(p, Proc, ptnode);
         childproc->parent = &root_proc;
-        zcnt += is_zombie(childproc);
+        zcnt += (childproc->state == ZOMBIE);
     }
     if (!_empty_list(&this->children)) {
         _merge_list(&root_proc.children, this->children.next);

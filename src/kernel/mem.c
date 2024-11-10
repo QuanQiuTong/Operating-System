@@ -71,11 +71,19 @@ static void merge(Node *h) {
 static Node *free8[NCPU] = {0}, *free4[NCPU] = {0};
 static SpinLock kalloc_lock[NCPU] = {0};
 
+#include <kernel/printk.h>
+
 void *kalloc(unsigned long long size) {
     Node **fr = (size & 0x7) ? free4 : free8;
     size = (size + 3) & ~0x3;
 
-    acquire_spinlock(&kalloc_lock[cpuid()]);
+    bool l = try_acquire_spinlock(&kalloc_lock[cpuid()]);
+    if(!l){
+        // Never reach here
+        printk("kalloc: failed to acquire spinlock\n");
+        arch_yield();
+        acquire_spinlock(&kalloc_lock[cpuid()]);
+    }
     Node *h = fr[cpuid()];
     for (; h; h = KADDR(h->next))
         if (h->free) {

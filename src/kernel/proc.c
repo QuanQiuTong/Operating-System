@@ -50,7 +50,7 @@ void init_proc(Proc *p) {
     p->parent = NULL;
     init_schinfo(&p->schinfo);
     init_pgdir(&p->pgdir);
-    p->kstack = kalloc_page();
+    p->kstack = memset(kalloc_page(), 0, PAGE_SIZE);
     p->ucontext = (UserContext *)((u64)p->kstack + PAGE_SIZE - 16 - sizeof(UserContext));
     p->kcontext = (KernelContext *)((u64)p->ucontext - sizeof(KernelContext));
 }
@@ -64,7 +64,7 @@ Proc *create_proc() {
 void set_parent_to_this(Proc *proc) {
     /// @note maybe you need to lock the process tree
     acquire_spinlock(&plock);
-    ASSERT(proc->parent == NULL);
+    // ASSERT(proc->parent == NULL);
     proc->parent = thisproc();
     _insert_into_list(&thisproc()->children, &proc->ptnode);
     release_spinlock(&plock);
@@ -122,7 +122,10 @@ int wait(int *exitcode) {
     release_spinlock(&plock);
 
     // 2. wait for childexit
-    wait_sem(&this->childexit);
+    if (!wait_sem(&this->childexit)) {
+        printk("wait_sem failed\n");
+        return -1;
+    }
 
     // 3. if any child exits, clean it up and return its pid and exitcode
     int id = -1;
@@ -149,32 +152,28 @@ NO_RETURN void exit(int code) {
     /// @note be careful of concurrency
 
     acquire_spinlock(&plock);
-    acquire_sched_lock();
 
     Proc *this = thisproc();
     ASSERT(this != &root_proc);
     this->exitcode = code;
+    post_sem(&this->parent->childexit);
 
     int zcnt = 0;
     for_list(this->children) {
         Proc *childproc = container_of(p, Proc, ptnode);
         childproc->parent = &root_proc;
-        zcnt += (childproc->state == ZOMBIE);
+        zcnt += is_zombie(childproc);
     }
     if (!_empty_list(&this->children)) {
         _merge_list(&root_proc.children, this->children.next);
         _detach_from_list(&this->children);
-        release_sched_lock();
         while (zcnt--)
             post_sem(&root_proc.childexit);
-        acquire_sched_lock();
+        
     }
-
-    free_pgdir(&this->pgdir);
-    release_sched_lock();
-
-    post_sem(&this->parent->childexit);
     acquire_sched_lock();
+    free_pgdir(&this->pgdir);
+
     release_spinlock(&plock);
     sched(ZOMBIE);
 
@@ -202,7 +201,7 @@ int kill(int pid) {
     acquire_spinlock(&plock);
     Proc *p = find_and_kill(pid, &root_proc);
     release_spinlock(&plock);
-    if (p) {
+    if (p && (p->ucontext->elr >> 48) == 0) {
         activate_proc(p);
         return 0;
     }

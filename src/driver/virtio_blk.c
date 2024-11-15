@@ -115,7 +115,7 @@ int virtio_blk_rw(Buf *b)
     arch_fence();
 
     release_spinlock(&disk.lk);
-    wait_sem(&b->sem);
+    ASSERT(wait_sem(&b->sem));
     // Semaphores needn't check the condition again, so 'while' is not needed here.
     ASSERT(b->flags & B_VALID);
     acquire_spinlock(&disk.lk);

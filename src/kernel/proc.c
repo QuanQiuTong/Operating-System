@@ -123,7 +123,7 @@ int wait(int *exitcode) {
 
     // 2. wait for childexit
     if (!wait_sem(&this->childexit)) {
-        printk("wait_sem failed\n");
+        // printk("wait_sem failed\n");
         return -1;
     }
 
@@ -202,7 +202,7 @@ int kill(int pid) {
     Proc *p = find_and_kill(pid, &root_proc);
     release_spinlock(&plock);
     if (p && (p->ucontext->elr >> 48) == 0) {
-        activate_proc(p);
+        alert_proc(p);
         return 0;
     }
     return -1;

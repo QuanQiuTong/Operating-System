@@ -1,0 +1,36 @@
+root@osh:~/data/OS-24Fall-FDU/build# make qemu
+[ 14%] Built target test
+[ 29%] Built target aarch64
+[ 46%] Built target common
+[ 65%] Built target kernelx
+[ 80%] Built target driver
+[ 85%] Built target user
+[ 91%] Built target kernel8.elf
+[ 97%] Built target kernel
+[100%] Built target image
+CPU 0: hello
+CPU 3: hello
+CPU 1: hello
+CPU 2: hello
+Hello world! (Core 3)
+proc_test
+proc_test_1
+proc 9 exit
+proc 8 exit
+proc 6 exit
+proc 5 exit
+proc 7 exit
+proc 1 exit
+Page fault
+proc 4 exit
+Page fault
+=====/root/data/OS-24Fall-FDU/src/aarch64/trap.c:36 PANIC0!=====
+=====/root/data/OS-24Fall-FDU/src/aarch64/trap.c:36 PANIC3!=====
+proc 2 exit
+CPU 0: stopped
+CPU 3: stopped
+CPU 1: stopped
+CPU 2: stopped
+Kernel PANIC invoked at /root/data/OS-24Fall-FDU/src/aarch64/trap.c:36. Stopped.
+Kernel PANIC invoked at /root/data/OS-24Fall-FDU/src/aarch64/trap.c:36. Stopped.
+QEMU: Terminated

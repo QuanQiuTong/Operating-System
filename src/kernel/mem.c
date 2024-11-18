@@ -77,6 +77,7 @@ void *kalloc(unsigned long long size) {
     Node **fr = (size & 0x7) ? free4 : free8;
     size = (size + 3) & ~0x3;
 
+#ifdef DEBUG
     bool l = try_acquire_spinlock(&kalloc_lock[cpuid()]);
     if(!l){
         // Never reach here
@@ -84,6 +85,9 @@ void *kalloc(unsigned long long size) {
         arch_yield();
         acquire_spinlock(&kalloc_lock[cpuid()]);
     }
+#else 
+    acquire_spinlock(&kalloc_lock[cpuid()]);
+#endif
     Node *h = fr[cpuid()];
     for (; h; h = KADDR(h->next))
         if (h->free) {

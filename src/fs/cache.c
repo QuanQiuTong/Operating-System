@@ -106,7 +106,7 @@ static usize get_num_cached_blocks() {
 }
 
 #define cond_wait(cond, lock) ( \
-    release_spinlock(lock), ASSERT(wait_sem(cond)), acquire_spinlock(lock))
+    release_spinlock(lock), unalertable_wait_sem(cond), acquire_spinlock(lock))
 
 #define for_list(node) for (ListNode *p = node.next; p != &node; p = p->next)
 
@@ -149,7 +149,9 @@ static Block *cache_acquire(usize block_no) {
     init_sleeplock(&b->lock);
     _insert_into_list(&head, &b->node);
 
-    ASSERT(acquire_sleeplock(&b->lock));
+    if (!acquire_sleeplock(&b->lock))
+        PANIC();
+
     device_read(b);
     release_spinlock(&lock);
     return b;
@@ -233,6 +235,7 @@ static void cache_sync(OpContext *ctx, Block *block) {
 // see `cache.h`.
 static void cache_end_op(OpContext *ctx) {
     acquire_spinlock(&log.lock);
+    // ASSERT(log.outstanding > 0);
     if (--log.outstanding == 0) {
         for (usize i = 0; i < header.num_blocks; ++i) {
             blockcopy(header.block_no[i], sblock->log_start + i + 1);
@@ -247,7 +250,18 @@ static void cache_end_op(OpContext *ctx) {
         header.num_blocks = 0;
         write_header();
     }
-    post_sem(&log.sem);
+
+/**
+ * if there are other threads waiting for the log, wake one such thread.
+ * same effect as cond_signal(&log.cond).
+ */
+    {
+        _lock_sem(&log.sem);
+        if (_query_sem(&log.sem) < 0) {
+            _post_sem(&log.sem);
+        }
+        _unlock_sem(&log.sem);
+    }
     release_spinlock(&log.lock);
 }
 

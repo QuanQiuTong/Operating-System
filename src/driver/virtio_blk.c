@@ -115,7 +115,10 @@ int virtio_blk_rw(Buf *b)
     arch_fence();
 
     release_spinlock(&disk.lk);
-    ASSERT(wait_sem(&b->sem));
+    if (!wait_sem(&b->sem)) {
+        printk("[Virtio]: Disk operation failed.");
+        PANIC(); // return -1;
+    }
     // Semaphores needn't check the condition again, so 'while' is not needed here.
     ASSERT(b->flags & B_VALID);
     acquire_spinlock(&disk.lk);

@@ -1,7 +1,10 @@
 #include <common/string.h>
 #include <fs/inode.h>
+#include <kernel/console.h>
 #include <kernel/mem.h>
 #include <kernel/printk.h>
+#include <kernel/sched.h>
+#include <sys/stat.h>
 
 /**
     @brief the private reference to the super block.
@@ -89,7 +92,7 @@ static usize inode_alloc(OpContext *ctx, InodeType type) {
             blk = cache->acquire(bno = to_block_no(ino));
         }
         if (get_entry(blk, ino)->type == INODE_INVALID) {
-            *get_entry(blk, ino) = (InodeEntry){.type = type}; // zero-initialized.
+            *get_entry(blk, ino) = (InodeEntry){.type = type};  // zero-initialized.
             cache->sync(ctx, blk);
             cache->release(blk);
             return ino;
@@ -277,6 +280,10 @@ static usize inode_map(OpContext *ctx,
 // see `inode.h`.
 static usize inode_read(Inode *inode, u8 *dest, usize offset, usize count) {
     InodeEntry *entry = &inode->entry;
+    if (entry->type == INODE_DEVICE) {
+        ASSERT(entry->major == 1);
+        return console_read(inode, (char *)dest, count);
+    }
     if (count + offset > entry->num_bytes)
         count = entry->num_bytes - offset;
     usize end = offset + count;
@@ -295,6 +302,10 @@ static usize inode_write(OpContext *ctx,
                          usize offset,
                          usize count) {
     InodeEntry *entry = &inode->entry;
+    if (entry->type == INODE_DEVICE) {
+        ASSERT(entry->major == 1);
+        return console_write(inode, (char *)src, count);
+    }
     usize end = offset + count;
     ASSERT(offset <= entry->num_bytes);
     ASSERT(end <= INODE_MAX_BYTES);
@@ -373,20 +384,20 @@ InodeTree inodes = {
 
 /**
     @brief read the next path element from `path` into `name`.
-    
+
     @param[out] name next path element.
 
     @return const char* a pointer offseted in `path`, without leading `/`. If no
     name to remove, return NULL.
 
-    @example 
+    @example
     skipelem("a/bb/c", name) = "bb/c", setting name = "a",
     skipelem("///a//bb", name) = "bb", setting name = "a",
     skipelem("a", name) = "", setting name = "a",
     skipelem("", name) = skipelem("////", name) = NULL, not setting name.
  */
-static const char* skipelem(const char* path, char* name) {
-    const char* s;
+static const char *skipelem(const char *path, char *name) {
+    const char *s;
     int len;
 
     while (*path == '/')
@@ -413,13 +424,13 @@ static const char* skipelem(const char* path, char* name) {
 
     If `nameiparent`, return the inode for the parent and copy the final
     path element into `name`.
-    
+
     @param path a relative or absolute path. If `path` is relative, it is
     relative to the current working directory of the process.
 
     @param[out] name the final path element if `nameiparent` is true.
 
-    @return Inode* the inode for `path` (or its parent if `nameiparent` is true), 
+    @return Inode* the inode for `path` (or its parent if `nameiparent` is true),
     or NULL if such inode does not exist.
 
     @example
@@ -427,31 +438,61 @@ static const char* skipelem(const char* path, char* name) {
     namex("/a/b", true, name) = inode of a, setting name = "b",
     namex("/", true, name) = NULL (because "/" has no parent!)
  */
-static Inode* namex(const char* path,
+static Inode *namex(const char *path,
                     bool nameiparent,
-                    char* name,
-                    OpContext* ctx) {
-    /* (Final) TODO BEGIN */
-    
-    /* (Final) TODO END */
-    return 0;
+                    char *name,
+                    OpContext *ctx) {
+    Inode *ip;
+    if (*path == '/') {
+        ip = inode_get(ROOT_INODE_NO);
+    } else {
+        ip = inode_share(thisproc()->cwd);
+    }
+    while ((path = skipelem(path, name)) != 0) {
+        inode_lock(ip);
+        if (ip->entry.type != INODE_DIRECTORY) {
+            inode_unlock(ip);
+            inode_put(ctx, ip);
+            return NULL;
+        }
+
+        if (nameiparent && *path == '\0') {
+            inode_unlock(ip);
+            return ip;
+        }
+        Inode *next = inode_get(inode_lookup(ip, name, 0));
+        if (next == NULL) {
+            inode_unlock(ip);
+            inode_put(ctx, ip);
+            return NULL;
+        }
+        inode_unlock(ip);
+        inode_put(ctx, ip);
+        ip = next;
+    }
+
+    if (nameiparent) {
+        inode_put(ctx, ip);
+        return NULL;
+    }
+    return ip;
 }
 
-Inode* namei(const char* path, OpContext* ctx) {
+Inode *namei(const char *path, OpContext *ctx) {
     char name[FILE_NAME_MAX_LENGTH];
     return namex(path, false, name, ctx);
 }
 
-Inode* nameiparent(const char* path, char* name, OpContext* ctx) {
+Inode *nameiparent(const char *path, char *name, OpContext *ctx) {
     return namex(path, true, name, ctx);
 }
 
 /**
     @brief get the stat information of `ip` into `st`.
-    
+
     @note the caller must hold the lock of `ip`.
  */
-void stati(Inode* ip, struct stat* st) {
+void stati(Inode *ip, struct stat *st) {
     st->st_dev = 1;
     st->st_ino = ip->inode_no;
     st->st_nlink = ip->entry.num_links;

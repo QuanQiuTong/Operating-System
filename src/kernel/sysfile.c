@@ -5,13 +5,12 @@
 //
 
 #include <fcntl.h>
+#include <stddef.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/sysmacros.h>
-#include <sys/mman.h>
-#include <stddef.h>
 
-#include "syscall.h"
 #include <aarch64/mmu.h>
 #include <common/defines.h>
 #include <common/spinlock.h>
@@ -25,36 +24,44 @@
 #include <kernel/printk.h>
 #include <kernel/proc.h>
 #include <kernel/sched.h>
+#include "syscall.h"
 
 struct iovec {
     void *iov_base; /* Starting address. */
-    usize iov_len; /* Number of bytes to transfer. */
+    usize iov_len;  /* Number of bytes to transfer. */
 };
 
-/** 
+#ifndef NOFILE
+#define NOFILE (sizeof(((struct oftable *)0)->openfile) / sizeof(File *))
+#endif
+
+/**
  * Get the file object by fd. Return null if the fd is invalid.
  */
-static struct file *fd2file(int fd)
-{
-    /* (Final) TODO BEGIN */
-    
-    /* (Final) TODO END */
+static struct file *fd2file(int fd) {
+    if ((unsigned)fd >= NOFILE)
+        return NULL;
+    return thisproc()->oftable.openfile[fd];
 }
 
 /*
  * Allocate a file descriptor for the given file.
  * Takes over file reference from caller on success.
  */
-int fdalloc(struct file *f)
-{
-    /* (Final) TODO BEGIN */
-    
-    /* (Final) TODO END */
+int fdalloc(struct file *f) {
+    File **openfile = thisproc()->oftable.openfile;
+
+    for (int fd = 0; fd < NOFILE; fd++) {
+        if (openfile[fd] == NULL) {
+            openfile[fd] = f;
+            return fd;
+        }
+    }
+
     return -1;
 }
 
-define_syscall(ioctl, int fd, u64 request)
-{
+define_syscall(ioctl, int fd, u64 request) {
     // 0x5413 is TIOCGWINSZ (I/O Control to Get the WINdow SIZe, a magic request
     // to get the stdin terminal size) in our implementation. Just ignore it.
     ASSERT(request == 0x5413);
@@ -62,23 +69,19 @@ define_syscall(ioctl, int fd, u64 request)
     return 0;
 }
 
-define_syscall(mmap, void *addr, int length, int prot, int flags, int fd,
-               int offset)
-{
+define_syscall(mmap, void *addr, int length, int prot, int flags, int fd, int offset) {
     /* (Final) TODO BEGIN */
-    
+
     /* (Final) TODO END */
 }
 
-define_syscall(munmap, void *addr, size_t length)
-{
+define_syscall(munmap, void *addr, size_t length) {
     /* (Final) TODO BEGIN */
-    
+
     /* (Final) TODO END */
 }
 
-define_syscall(dup, int fd)
-{
+define_syscall(dup, int fd) {
     struct file *f = fd2file(fd);
     if (!f)
         return -1;
@@ -89,24 +92,21 @@ define_syscall(dup, int fd)
     return fd;
 }
 
-define_syscall(read, int fd, char *buffer, int size)
-{
+define_syscall(read, int fd, char *buffer, int size) {
     struct file *f = fd2file(fd);
     if (!f || size <= 0 || !user_writeable(buffer, size))
         return -1;
     return file_read(f, buffer, size);
 }
 
-define_syscall(write, int fd, char *buffer, int size)
-{
+define_syscall(write, int fd, char *buffer, int size) {
     struct file *f = fd2file(fd);
     if (!f || size <= 0 || !user_readable(buffer, size))
         return -1;
     return file_write(f, buffer, size);
 }
 
-define_syscall(writev, int fd, struct iovec *iov, int iovcnt)
-{
+define_syscall(writev, int fd, struct iovec *iov, int iovcnt) {
     struct file *f = fd2file(fd);
     struct iovec *p;
     if (!f || iovcnt <= 0 || !user_readable(iov, sizeof(struct iovec) * iovcnt))
@@ -120,25 +120,23 @@ define_syscall(writev, int fd, struct iovec *iov, int iovcnt)
     return tot;
 }
 
-define_syscall(close, int fd)
-{
-    /* (Final) TODO BEGIN */
-    
-    /* (Final) TODO END */
+define_syscall(close, int fd) {
+    struct file *f = fd2file(fd);
+    if (!f)
+        return -1;
+    thisproc()->oftable.openfile[fd] = NULL;
+    file_close(f);
     return 0;
 }
 
-define_syscall(fstat, int fd, struct stat *st)
-{
+define_syscall(fstat, int fd, struct stat *st) {
     struct file *f = fd2file(fd);
     if (!f || !user_writeable(st, sizeof(*st)))
         return -1;
     return file_stat(f, st);
 }
 
-define_syscall(newfstatat, int dirfd, const char *path, struct stat *st,
-               int flags)
-{
+define_syscall(newfstatat, int dirfd, const char *path, struct stat *st, int flags) {
     if (!user_strlen(path, 256) || !user_writeable(st, sizeof(*st)))
         return -1;
     if (dirfd != AT_FDCWD) {
@@ -166,8 +164,7 @@ define_syscall(newfstatat, int dirfd, const char *path, struct stat *st,
     return 0;
 }
 
-static int isdirempty(Inode *dp)
-{
+static int isdirempty(Inode *dp) {
     usize off;
     DirEntry de;
 
@@ -180,8 +177,7 @@ static int isdirempty(Inode *dp)
     return 1;
 }
 
-define_syscall(unlinkat, int fd, const char *path, int flag)
-{
+define_syscall(unlinkat, int fd, const char *path, int flag) {
     ASSERT(fd == AT_FDCWD && flag == 0);
     Inode *ip, *dp;
     DirEntry de;
@@ -257,17 +253,47 @@ bad:
 
     @return Inode* the created inode, or NULL if failed.
  */
-Inode *create(const char *path, short type, short major, short minor,
-              OpContext *ctx)
-{
-    /* (Final) TODO BEGIN */
-    
-    /* (Final) TODO END */
-    return 0;
+Inode *create(const char *path, short type, short major, short minor, OpContext *ctx) {
+    char name[FILE_NAME_MAX_LENGTH];
+    Inode *dir = nameiparent(path, name, ctx);
+    if (dir == NULL)
+        return NULL;
+        
+    inodes.lock(dir);
+
+    Inode *ip = inodes.get(inodes.lookup(dir, name, 0));
+    if (ip != NULL) {
+        inodes.unlock(dir);
+        inodes.put(ctx, dir);
+        inodes.lock(ip);
+        if (type == INODE_REGULAR && ip->entry.type == INODE_REGULAR)
+            return ip;
+        inodes.unlock(ip);
+        inodes.put(ctx, ip);
+        return NULL;
+    }
+
+    ip = inodes.get(inodes.alloc(ctx, type));
+    ASSERT(ip != NULL);
+    inodes.lock(ip);
+    // bcache.end_op(ctx);
+    ip->entry.major = major;
+    ip->entry.minor = minor;
+    ip->entry.num_links = 1;
+    inodes.sync(ctx, ip, true);  // equals to iupdate
+    if (type == INODE_DIRECTORY) {
+        dir->entry.num_links++;
+        inodes.sync(ctx, dir, true);
+        inodes.insert(ctx, ip, ".", ip->inode_no);
+        inodes.insert(ctx, ip, "..", dir->inode_no);
+    }
+    inodes.insert(ctx, dir, name, ip->inode_no);
+    inodes.unlock(dir);
+    inodes.put(ctx, dir);
+    return ip;
 }
 
-define_syscall(openat, int dirfd, const char *path, int omode)
-{
+define_syscall(openat, int dirfd, const char *path, int omode) {
     int fd;
     struct file *f;
     Inode *ip;
@@ -316,8 +342,7 @@ define_syscall(openat, int dirfd, const char *path, int omode)
     return fd;
 }
 
-define_syscall(mkdirat, int dirfd, const char *path, int mode)
-{
+define_syscall(mkdirat, int dirfd, const char *path, int mode) {
     Inode *ip;
     if (!user_strlen(path, 256))
         return -1;
@@ -341,8 +366,7 @@ define_syscall(mkdirat, int dirfd, const char *path, int mode)
     return 0;
 }
 
-define_syscall(mknodat, int dirfd, const char *path, mode_t mode, dev_t dev)
-{
+define_syscall(mknodat, int dirfd, const char *path, mode_t mode, dev_t dev) {
     Inode *ip;
     if (!user_strlen(path, 256))
         return -1;
@@ -366,22 +390,48 @@ define_syscall(mknodat, int dirfd, const char *path, mode_t mode, dev_t dev)
     return 0;
 }
 
-define_syscall(chdir, const char *path)
-{
+define_syscall(chdir, const char *path) {
     /**
-     * (Final) TODO BEGIN 
-     * 
      * Change the cwd (current working dictionary) of current process to 'path'.
-     * You may need to do some validations.
      */
-    
-    /* (Final) TODO END */
+
+    OpContext ctx;
+    bcache.begin_op(&ctx);
+    Inode *ip = namei(path, &ctx);
+    if (ip == NULL) {
+        bcache.end_op(&ctx);
+        return -1;
+    }
+    inodes.lock(ip);
+    if (ip->entry.type != INODE_DIRECTORY) {
+        inodes.unlock(ip);
+        inodes.put(&ctx, ip);
+        bcache.end_op(&ctx);
+        return -1;
+    }
+    inodes.unlock(ip);
+    Proc *nowproc = thisproc();
+    inodes.put(&ctx, nowproc->cwd);
+    bcache.end_op(&ctx);
+    nowproc->cwd = ip;
+    return 0;
 }
 
-define_syscall(pipe2, int pipefd[2], int flags)
-{
-
-    /* (Final) TODO BEGIN */
-    
-    /* (Final) TODO END */
+define_syscall(pipe2, int pipefd[2], int flags) {
+    File *rf, *wf;
+    if (flags)
+        return -1;
+    if (pipeAlloc(&rf, &wf) < 0)
+        return -1;
+    int fd0 = fdalloc(rf), fd1 = fdalloc(wf);
+    if (fd0 < 0 || fd1 < 0) {
+        if (fd0 >= 0)
+            thisproc()->oftable.openfile[fd0] = 0;
+        fileclose(rf);
+        fileclose(wf);
+        return -1;
+    }
+    pipefd[0] = fd0;
+    pipefd[1] = fd1;
+    return 0;
 }

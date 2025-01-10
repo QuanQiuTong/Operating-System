@@ -30,13 +30,15 @@ typedef struct file {
 } File;
 
 struct ftable {
-    // TODO: table of file objects in the system
+    // table of file objects in the system
 
-    // Note: you may need a lock to prevent concurrent access to the table!
+    SpinLock lock;
+    File filelist[NFILE];
 };
 
 struct oftable {
-    // TODO: table of opened file descriptors in a process
+    // table of opened file descriptors in a process
+    File* openfile[16];
 };
 
 // initialize the global file table.

@@ -89,7 +89,7 @@ static INLINE void write_header() {
 }
 
 // initialize a block struct.
-static void init_block(Block *block) {
+/* static void init_block(Block *block) {
     block->block_no = 0;
     init_list_node(&block->node);
     block->acquired = false;
@@ -98,7 +98,7 @@ static void init_block(Block *block) {
     init_sleeplock(&block->lock);
     block->valid = false;
     memset(block->data, 0, sizeof(block->data));
-}
+} */
 
 // see `cache.h`.
 static usize get_num_cached_blocks() {
@@ -142,6 +142,7 @@ static Block *cache_acquire(usize block_no) {
     blocknum++;
 
     Block *b = kalloc(sizeof(Block));
+
     b->block_no = block_no,
     b->acquired = true,
     b->pinned = false,
@@ -234,6 +235,7 @@ static void cache_sync(OpContext *ctx, Block *block) {
 
 // see `cache.h`.
 static void cache_end_op(OpContext *ctx) {
+    (void)ctx;
     acquire_spinlock(&log.lock);
     // ASSERT(log.outstanding > 0);
     if (--log.outstanding == 0) {

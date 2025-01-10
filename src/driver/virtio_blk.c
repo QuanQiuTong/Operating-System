@@ -114,9 +114,14 @@ int virtio_blk_rw(Buf *b)
     REG(VIRTIO_REG_QUEUE_NOTIFY) = 0;
     arch_fence();
 
-    /* LAB 4 TODO 1 BEGIN */
-    
-    /* LAB 4 TODO 1 END */
+    release_spinlock(&disk.lk);
+    if (!wait_sem(&b->sem)) {
+        printk("[Virtio]: Disk operation failed.");
+        PANIC(); // return -1;
+    }
+    // Semaphores needn't check the condition again, so 'while' is not needed here.
+    ASSERT(b->flags & B_VALID);
+    acquire_spinlock(&disk.lk);
 
     disk.virtq.info[d0].done = 0;
     free_desc(&disk.virtq, d0);
@@ -134,13 +139,21 @@ static void virtio_blk_intr()
     int d0;
     while (disk.virtq.last_used_idx != disk.virtq.used->idx) {
         d0 = disk.virtq.used->ring[disk.virtq.last_used_idx % NQUEUE].id;
-        if (disk.virtq.info[d0].status != 0) {
+        if (disk.virtq.info[d0].status != VIRTIO_BLK_S_OK) {
             PANIC();
         }
 
-        /* LAB 4 TODO 2 BEGIN */
-    
-        /* LAB 4 TODO 2 END */
+        Buf* b = container_of(disk.virtq.info[d0].buf, Buf, data[0]);
+        // Buf* b = (Buf*)((char*)disk.virtq.info[d0].buf - offset_of(Buf, data));
+        
+        /**
+         * If B_DIRTY is set, write buf to disk, clear B_DIRTY, set B_VALID.
+         * Else if B_VALID is not set, read buf from disk, set B_VALID.
+         */
+        if(b->flags & B_DIRTY)
+            b->flags &= ~B_DIRTY;
+        b->flags |= B_VALID;
+        post_sem(&b->sem);
 
         disk.virtq.info[d0].buf = NULL;
         disk.virtq.last_used_idx++;

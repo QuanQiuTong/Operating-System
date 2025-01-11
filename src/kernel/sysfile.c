@@ -32,14 +32,14 @@ struct iovec {
 };
 
 #ifndef NOFILE
-#define NOFILE (sizeof(((struct oftable *)0)->openfile) / sizeof(File *))
+#define NOFILE (int)(sizeof(((struct oftable *)0)->openfile) / sizeof(File *))
 #endif
 
 /**
  * Get the file object by fd. Return null if the fd is invalid.
  */
 static struct file *fd2file(int fd) {
-    if ((unsigned)fd >= NOFILE)
+    if ((unsigned)fd >= (unsigned)NOFILE)
         return NULL;
     return thisproc()->oftable.openfile[fd];
 }
@@ -70,15 +70,99 @@ define_syscall(ioctl, int fd, u64 request) {
 }
 
 define_syscall(mmap, void *addr, int length, int prot, int flags, int fd, int offset) {
-    /* (Final) TODO BEGIN */
+    if (addr != NULL) {
+        printk("sys_mmap: addr unimplemented\n");
+        return -1;
+    }
+    if (length <= 0 || (prot & PROT_EXEC) || (flags & MAP_ANONYMOUS)) {
+        printk("sys_mmap: length, prot, flags unimplemented\n");
+        return -1;
+    }
+    if (fd < 0 || fd >= NOFILE) {
+        printk("sys_mmap: fd unimplemented\n");
+        return -1;
+    }
+    if (offset % PAGE_SIZE != 0) {
+        printk("sys_mmap: offset unimplemented\n");
+        return -1;
+    }
 
-    /* (Final) TODO END */
+    struct file *f = fd2file(fd);
+    if (!f) {
+        printk("sys_mmap: fd2file failed\n");
+        return -1;
+    }
+
+    Inode *ip = f->ip;
+    if (!ip) {
+        printk("sys_mmap: ip is NULL\n");
+        return -1;
+    }
+
+    usize size = round_up(length, PAGE_SIZE);
+    if (size == 0) {
+        printk("sys_mmap: size is 0\n");
+        return -1;
+    }
+
+    OpContext ctx;
+    bcache.begin_op(&ctx);
+    inodes.lock(ip);
+    if (ip->entry.type != INODE_REGULAR) {
+        inodes.unlock(ip);
+        bcache.end_op(&ctx);
+        return -1;
+    }
+
+    struct section *sec = kalloc(sizeof(struct section));
+    init_list_node(&sec->stnode);
+    sec->flags = ST_FILE;
+    sec->begin = 0;
+    sec->end = size;
+    sec->fp = f;
+    sec->offset = offset;
+    sec->length = size;
+    _insert_into_list(&thisproc()->pgdir.section_head, &sec->stnode);
+
+    inodes.unlock(ip);
+    bcache.end_op(&ctx);
+
+    return 0;
 }
 
-define_syscall(munmap, void *addr, size_t length) {
-    /* (Final) TODO BEGIN */
+#define for_list(node) for (ListNode *p = node.next; p != &node; p = p->next)
 
-    /* (Final) TODO END */
+define_syscall(munmap, void *addr, size_t length) {
+    if (addr != NULL) {
+        printk("sys_munmap: addr unimplemented\n");
+        return -1;
+    }
+    if (length <= 0) {
+        printk("sys_munmap: length unimplemented\n");
+        return -1;
+    }
+
+    struct section *sec = NULL;
+    for_list(thisproc()->pgdir.section_head) {
+        sec = container_of(p, struct section, stnode);
+        if (addr >= (void *)sec->begin && addr < (void *)sec->end) {
+            break;
+        }
+    }
+
+    if (!sec || addr < (void *)sec->begin || addr >= (void *)sec->end) {
+        printk("sys_munmap: Invalid memory access at %p\n", addr);
+        return -1;
+    }
+
+    if (length != sec->end - sec->begin) {
+        printk("sys_munmap: length is not equal to the section size\n");
+        return -1;
+    }
+
+    _detach_from_list(&sec->stnode);
+    kfree(sec);
+    return 0;
 }
 
 define_syscall(dup, int fd) {
@@ -258,7 +342,7 @@ Inode *create(const char *path, short type, short major, short minor, OpContext 
     Inode *dir = nameiparent(path, name, ctx);
     if (dir == NULL)
         return NULL;
-        
+
     inodes.lock(dir);
 
     Inode *ip = inodes.get(inodes.lookup(dir, name, 0));
@@ -367,6 +451,7 @@ define_syscall(mkdirat, int dirfd, const char *path, int mode) {
 }
 
 define_syscall(mknodat, int dirfd, const char *path, mode_t mode, dev_t dev) {
+    (void)mode;
     Inode *ip;
     if (!user_strlen(path, 256))
         return -1;
@@ -421,14 +506,14 @@ define_syscall(pipe2, int pipefd[2], int flags) {
     File *rf, *wf;
     if (flags)
         return -1;
-    if (pipeAlloc(&rf, &wf) < 0)
+    if (pipe_alloc(&rf, &wf) < 0)
         return -1;
     int fd0 = fdalloc(rf), fd1 = fdalloc(wf);
     if (fd0 < 0 || fd1 < 0) {
         if (fd0 >= 0)
             thisproc()->oftable.openfile[fd0] = 0;
-        fileclose(rf);
-        fileclose(wf);
+        file_close(rf);
+        file_close(wf);
         return -1;
     }
     pipefd[0] = fd0;

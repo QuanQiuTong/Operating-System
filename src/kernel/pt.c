@@ -8,7 +8,7 @@
 #define cpalloc() memset(kalloc_page(), 0, PAGE_SIZE)
 
 #define chk(expr) ({                     \
-    PTEntry* p = expr;               \
+    PTEntry *p = expr;                   \
     if (!*p) {                           \
         if (!alloc)                      \
             return NULL;                 \
@@ -69,11 +69,12 @@ void attach_pgdir(struct pgdir *pgdir) {
  * address 'ka' in page directory 'pd', 'flags' is the flags for the page
  * table entry.
  */
-void vmmap(struct pgdir *pd, u64 va, void *ka, u64 flags)
-{
-    /* (Final) TODO BEGIN */
-
-    /* (Final) TODO END */
+void vmmap(struct pgdir *pd, u64 va, void *ka, u64 flags) {
+    auto pte = get_pte(pd, va, true);
+    *pte = K2P(ka) | flags;
+    /* some ref count... */
+    attach_pgdir(pd);
+    arch_tlbi_vmalle1is();
 }
 
 /*
@@ -81,9 +82,29 @@ void vmmap(struct pgdir *pd, u64 va, void *ka, u64 flags)
  * Allocate physical pages if required.
  * Useful when pgdir is not the current page table.
  */
-int copyout(struct pgdir *pd, void *va, void *p, usize len)
-{
-    /* (Final) TODO BEGIN */
+int copyout(struct pgdir *pd, void *va, void *p, usize len) {
+    if (((usize)va + len) & KSPACE_MASK)
+        return -1;
 
-    /* (Final) TODO END */
+    for (usize n; len; len -= n, va += n) {
+        u64 *pte;
+        if ((pte = get_pte(pd, (u64)va, 1)) == NULL)
+            return -1;
+        void *page;
+        if (*pte & PTE_VALID) {
+            page = (void *)P2K(PTE_ADDRESS(*pte));
+        } else {
+            if ((page = kalloc_page()) == NULL)
+                return -1;
+            *pte = K2P(page) | PTE_USER_DATA;
+        }
+        usize pgoff = (usize)va % PAGE_SIZE;
+        n = MIN(PAGE_SIZE - pgoff, len);
+        if (p) {
+            memmove(page + pgoff, p, n);
+            p += n;
+        } else
+            memset(page + pgoff, 0, n);
+    }
+    return 0;
 }

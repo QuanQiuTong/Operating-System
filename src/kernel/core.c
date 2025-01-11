@@ -50,9 +50,11 @@ static void get_second_partition() {
         lba_start, sector_count);
 }
 
+void set_parent_to_this(Proc *proc);
+
 NO_RETURN void kernel_entry() {
     init_filesystem();
-    
+
     printk("Hello world! (Core %lld)\n", cpuid());
     proc_test();
     vm_test();
@@ -62,13 +64,33 @@ NO_RETURN void kernel_entry() {
     get_second_partition();
 
     /**
-     * (Final) TODO BEGIN 
-     * 
      * Map init.S to user space and trap_return to run icode.
      */
-
-
-    /* (Final) TODO END */
+    extern char icode[], eicode[];
+    void trap_return();
+    Proc *p = create_proc();
+    for (u64 q = (u64)icode; q < (u64)eicode; q += PAGE_SIZE) {
+        *get_pte(&p->pgdir, 0x400000 + q - (u64)icode, true) = K2P(q) | PTE_USER_DATA;
+    }
+    ASSERT(p->pgdir.pt);
+    p->ucontext->x[0] = 0;
+    p->ucontext->elr = 0x400000;
+    // p->ucontext->ttbr0 = K2P(p->pgdir.pt);
+    p->ucontext->spsr = 0;
+    OpContext ctx;
+    bcache.begin_op(&ctx);
+    p->cwd = namei("/", &ctx);
+    bcache.end_op(&ctx);
+    
+    set_parent_to_this(p);
+    start_proc(p, trap_return, 0);
+    printk("start\n");
+    while (1) {
+        yield();
+        arch_with_trap {
+            arch_wfi();
+        }
+    }
 }
 
 NO_INLINE NO_RETURN void _panic(const char *file, int line) {

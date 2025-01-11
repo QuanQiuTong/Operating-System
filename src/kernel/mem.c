@@ -12,12 +12,21 @@ RefCount kalloc_page_cnt;
 static SpinLock page_lock = {0};
 static ListNode list = {&list, &list};  // deleted pages.
 static char *mm_end;                    // lowest allocated page address
+static int pagenum = 0;                 // total number of pages. avoid re-calculating.
 
 void kinit() {
     init_rc(&kalloc_page_cnt);
+    init_spinlock(&page_lock);
+    init_list_node(&list);
 
     extern char end[];
     mm_end = (char *)((u64)(end - 1) & ~0xFFFull);
+
+    pagenum = PAGE_COUNT;
+}
+
+u64 left_page_cnt() {
+    return pagenum - kalloc_page_cnt.count;
 }
 
 void *kalloc_page() {
@@ -79,13 +88,13 @@ void *kalloc(unsigned long long size) {
 
 #ifdef DEBUG
     bool l = try_acquire_spinlock(&kalloc_lock[cpuid()]);
-    if(!l){
+    if (!l) {
         // Never reach here
         printk("kalloc: failed to acquire spinlock\n");
         arch_yield();
         acquire_spinlock(&kalloc_lock[cpuid()]);
     }
-#else 
+#else
     acquire_spinlock(&kalloc_lock[cpuid()]);
 #endif
     Node *h = fr[cpuid()];
@@ -122,6 +131,6 @@ void kfree(void *ptr) {
     release_spinlock(&kalloc_lock[cpuid()]);
 }
 
-void* get_zero_page() {
+void *get_zero_page() {
     return NULL;
 }

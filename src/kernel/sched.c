@@ -14,7 +14,7 @@ static SpinLock sched_lock = {0};
 static ListNode rq = {&rq, &rq};  // 调度队列，放着所有RUNNING和RUNNABLE的进程
 
 static void sched_timer_handler(struct timer *t) {
-    // t->data = 0;
+    (void)t;  // t->data = 0;
     acquire_sched_lock();
     sched(RUNNABLE);
 }

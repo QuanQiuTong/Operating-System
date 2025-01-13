@@ -345,8 +345,9 @@ Inode *create(const char *path, short type, short major, short minor, OpContext 
 
     inodes.lock(dir);
 
-    Inode *ip = inodes.get(inodes.lookup(dir, name, 0));
-    if (ip != NULL) {
+    usize ino = inodes.lookup(dir, name, 0);
+    if (ino != 0) {
+        Inode *ip = inodes.get(ino);
         inodes.unlock(dir);
         inodes.put(ctx, dir);
         inodes.lock(ip);
@@ -357,7 +358,7 @@ Inode *create(const char *path, short type, short major, short minor, OpContext 
         return NULL;
     }
 
-    ip = inodes.get(inodes.alloc(ctx, type));
+    Inode *ip = inodes.get(inodes.alloc(ctx, type));
     ASSERT(ip != NULL);
     inodes.lock(ip);
     // bcache.end_op(ctx);

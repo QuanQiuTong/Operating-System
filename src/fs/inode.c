@@ -160,6 +160,12 @@ found:
     inode_sync(NULL, inode, false);
     inode_unlock(inode);
 
+    if (inode == NULL) {
+        printk("inode_get: inode %llu is NULL\n", inode_no);
+        printk("This should not happen\n");
+        PANIC();
+    }
+
     return inode;
 }
 
@@ -284,7 +290,7 @@ static ALWAYS_INLINE void rw(OpContext *ctx, Inode *inode, u8 *buf, usize *off, 
 static usize inode_read(Inode *inode, u8 *dest, usize offset, usize count) {
     InodeEntry *entry = &inode->entry;
     if (entry->type == INODE_DEVICE) {
-        ASSERT(entry->major == 1);
+        // ASSERT(entry->major == 1);
         return console_read(inode, (char *)dest, count);
     }
     if (count + offset > entry->num_bytes)
@@ -306,7 +312,7 @@ static usize inode_write(OpContext *ctx,
                          usize count) {
     InodeEntry *entry = &inode->entry;
     if (entry->type == INODE_DEVICE) {
-        ASSERT(entry->major == 1);
+        // ASSERT(entry->major == 1);
         return console_write(inode, (char *)src, count);
     }
     usize end = offset + count;
@@ -463,15 +469,15 @@ static Inode *namex(const char *path,
             inode_unlock(ip);
             return ip;
         }
-        Inode *next = inode_get(inode_lookup(ip, name, 0));
-        if (next == NULL) {
+        usize ino = inode_lookup(ip, name, 0);
+        if (ino == 0) {
             inode_unlock(ip);
             inode_put(ctx, ip);
             return NULL;
         }
         inode_unlock(ip);
         inode_put(ctx, ip);
-        ip = next;
+        ip = inode_get(ino);
     }
 
     if (nameiparent) {

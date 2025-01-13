@@ -3,6 +3,7 @@
 #include <kernel/printk.h>
 #include <kernel/sched.h>
 #include <test/test.h>
+#include <driver/memlayout.h>
 
 volatile bool panic_flag;
 
@@ -21,6 +22,7 @@ NO_RETURN void idle_entry() {
 }
 
 void set_parent_to_this(Proc *proc);
+void trap_return(u64);
 
 NO_RETURN void kernel_entry() {
     init_filesystem();
@@ -35,16 +37,17 @@ NO_RETURN void kernel_entry() {
      * Map init.S to user space and trap_return to run icode.
      */
     extern char icode[], eicode[];
-    void trap_return();
     Proc *p = create_proc();
     for (u64 q = (u64)icode; q < (u64)eicode; q += PAGE_SIZE) {
-        *get_pte(&p->pgdir, 0x400000 + q - (u64)icode, true) = K2P(q) | PTE_USER_DATA;
+        *get_pte(&p->pgdir, EXTMEM + q - (u64)icode, true) = K2P(q) | PTE_USER_DATA;
     }
     ASSERT(p->pgdir.pt);
+
     p->ucontext->x[0] = 0;
-    p->ucontext->elr = 0x400000;
+    p->ucontext->elr = EXTMEM;
     // p->ucontext->ttbr0 = K2P(p->pgdir.pt);
     p->ucontext->spsr = 0;
+
     OpContext ctx;
     bcache.begin_op(&ctx);
     p->cwd = namei("/", &ctx);
@@ -53,6 +56,7 @@ NO_RETURN void kernel_entry() {
     set_parent_to_this(p);
     start_proc(p, trap_return, 0);
     printk("start\n");
+    
     while (1) {
         yield();
         arch_with_trap {

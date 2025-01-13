@@ -1,6 +1,7 @@
 #include <common/string.h>
 #include <driver/virtio.h>
 #include <fs/block_device.h>
+#define BLOCKNO_OFFSET 0x20800  // block at 65MiB, which is the start of the second partition
 
 /**
     @brief a simple implementation of reading a block from SD card.
@@ -10,7 +11,7 @@
  */
 static void sd_read(usize block_no, u8 *buffer) {
     Buf b;
-    b.block_no = (u32)block_no;
+    b.block_no = (u32)block_no + BLOCKNO_OFFSET;
     b.flags = 0;
     virtio_blk_rw(&b);
     memcpy(buffer, b.data, BLOCK_SIZE);
@@ -24,7 +25,7 @@ static void sd_read(usize block_no, u8 *buffer) {
  */
 static void sd_write(usize block_no, u8 *buffer) {
     Buf b;
-    b.block_no = (u32)block_no;
+    b.block_no = (u32)block_no + BLOCKNO_OFFSET;
     b.flags = B_DIRTY | B_VALID;
     memcpy(b.data, buffer, BLOCK_SIZE);
     virtio_blk_rw(&b);
@@ -42,6 +43,7 @@ static void sd_write(usize block_no, u8 *buffer) {
 static u8 sblock_data[BLOCK_SIZE];
 
 static ALWAYS_INLINE u32 second_partition() {
+    return BLOCKNO_OFFSET;
     Buf b = {.flags = 0, .block_no = 0};
     virtio_blk_rw(&b);
     return *(u32 *)(b.data + 0x1CE + 0x8);
@@ -56,7 +58,7 @@ void init_block_device() {
     // static __attribute__((unused)) void probe();
     // probe();
 
-    u32 sblock_no = second_partition() + 1;
+    u32 sblock_no = 1;
     block_device.read(sblock_no, sblock_data);
 }
 

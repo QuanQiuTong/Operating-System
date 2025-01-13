@@ -39,7 +39,7 @@ int uvm_alloc(struct pgdir *pgdir, u64 base, u64 stksz, u64 oldsz, u64 newsz) {
 }
 
 /* Data cache clean and invalidate by virtual address to point of coherency. */
-static ALWAYS_INLINE void arch_dccivac(void* p, int n) {
+static ALWAYS_INLINE void arch_dccivac(void *p, int n) {
     while (n--)
         asm volatile("dc civac, %[x]" : : [x] "r"(p + n));
 }
@@ -81,7 +81,6 @@ int execve(const char *path, char *const argv[], char *const envp[]) {
     Elf64_Phdr ph;
     u64 sz = 0, base = 0, stksz = 0;
     bool first = true;
-    // printk("elf.e_phnum:%d\n",elf.e_phnum);
     for (usize i = 0, off = elf.e_phoff; i < elf.e_phnum; i++, off += sizeof(ph)) {
         if ((inodes.read(ip, (u8 *)&ph, off, sizeof(ph))) != sizeof(ph)) {
             PANIC();
@@ -106,13 +105,16 @@ int execve(const char *path, char *const argv[], char *const envp[]) {
             PANIC();
         }
         attach_pgdir(pgdir);
-        // printk("filesz:%lld\n",(u64)ph.p_filesz);
-        // attention
         arch_tlbi_vmalle1is();
-        if (inodes.read(ip, (u8 *)ph.p_vaddr, ph.p_offset, ph.p_filesz) != ph.p_filesz) {
+
+        static u8 buf[10 << 20];  // todo: no buffer, direct copy to user space
+        if (inodes.read(ip, buf, ph.p_offset, ph.p_filesz) != ph.p_filesz) {
             PANIC();
         }
-        memset((void *)ph.p_vaddr + ph.p_filesz, 0, ph.p_memsz - ph.p_filesz);
+        copyout(pgdir, (void *)ph.p_vaddr, buf, ph.p_filesz);
+
+        // memset((void *)ph.p_vaddr + ph.p_filesz, 0, ph.p_memsz - ph.p_filesz);
+
         arch_fence();
         arch_dccivac((void *)ph.p_vaddr, ph.p_memsz);
         arch_fence();
@@ -136,18 +138,11 @@ int execve(const char *path, char *const argv[], char *const envp[]) {
 
     uint64_t *newargv = newsp + 8;
     uint64_t *newenvp = (void *)newargv + 8 * (argc + 1);
-    // printk("in exec1: proc%p ucontext:%p elr:%p\n",curproc,curproc->ucontext ,(void*)thisproc()->ucontext->elr);
-    for (int i = envc - 1; i >= 0; i--) {
-        newenvp[i] = (uint64_t)sp;
-        while (*sp++)
-            ;
-    }
-    for (int i = argc - 1; i >= 0; i--) {
-        newargv[i] = (uint64_t)sp;
-        while (*sp++)
-            ;
-    }
-    *(usize *)(newsp) = argc;
+
+    copyout(pgdir, (void *)newsp, &argc, sizeof(usize));
+    copyout(pgdir, (void *)newsp + 8, newenvp, sizeof(newenvp));
+    copyout(pgdir, (void *)newsp + 8 + 8 * (argc + 1), newargv, sizeof(newargv));
+
     sp = newsp;
     stksz = (USERTOP - (usize)sp + 10 * PAGE_SIZE - 1) / (10 * PAGE_SIZE) * (10 * PAGE_SIZE);
     copyout(pgdir, (void *)(USERTOP - stksz), 0, stksz - (USERTOP - (usize)sp));
@@ -158,7 +153,7 @@ int execve(const char *path, char *const argv[], char *const envp[]) {
     attach_pgdir(&curproc->pgdir);
     arch_tlbi_vmalle1is();
     free_pgdir(&oldpigdir);
-    // printk("in exec1: proc%p ucontext:%p elr:%p\n",curproc,curproc->ucontext ,(void*)thisproc()->ucontext->elr);
+
     return 0;
 
 bad:

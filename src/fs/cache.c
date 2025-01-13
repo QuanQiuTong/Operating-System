@@ -89,7 +89,7 @@ static INLINE void write_header() {
 }
 
 // initialize a block struct.
-/* static void init_block(Block *block) {
+static __attribute__((unused)) void init_block(Block *block) {
     block->block_no = 0;
     init_list_node(&block->node);
     block->acquired = false;
@@ -98,7 +98,7 @@ static INLINE void write_header() {
     init_sleeplock(&block->lock);
     block->valid = false;
     memset(block->data, 0, sizeof(block->data));
-} */
+}
 
 // see `cache.h`.
 static usize get_num_cached_blocks() {

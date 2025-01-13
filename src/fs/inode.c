@@ -65,9 +65,11 @@ void init_inodes(const SuperBlock *_sblock, const BlockCache *_cache) {
     sblock = _sblock;
     cache = _cache;
 
-    if (ROOT_INODE_NO < sblock->num_inodes)
+    if (ROOT_INODE_NO < sblock->num_inodes) {
         inodes.root = inodes.get(ROOT_INODE_NO);
-    else
+        if (inodes.root->entry.type != INODE_DIRECTORY)
+            printk("(panic) init_inodes: root inode is not a directory.\n");
+    } else
         printk("(warn) init_inodes: no root inode.\n");
 }
 
@@ -262,20 +264,21 @@ static usize inode_map(OpContext *ctx,
     return bno;
 }
 
-#define rw(ctx, buf, WRITE) ({                                                               \
-    while (offset < end) {                                                                   \
-        usize len = MIN(BLOCK_SIZE - offset % BLOCK_SIZE, end - offset);                     \
-        Block *blk = cache->acquire(inode_map(ctx, inode, offset / BLOCK_SIZE, &(bool){0})); \
-        if (WRITE) {                                                                         \
-            memcpy(blk->data + offset % BLOCK_SIZE, buf, len);                               \
-            cache->sync(ctx, blk);                                                           \
-        } else                                                                               \
-            memcpy(buf, blk->data + offset % BLOCK_SIZE, len);                               \
-        cache->release(blk);                                                                 \
-        buf += len;                                                                          \
-        offset += len;                                                                       \
-    }                                                                                        \
-})
+static ALWAYS_INLINE void rw(OpContext *ctx, Inode *inode, u8 *buf, usize *off, usize end, bool WRITE) {
+    while (*off < end) {
+        usize len = MIN(BLOCK_SIZE - *off % BLOCK_SIZE, end - *off);
+        usize bno = inode_map(ctx, inode, *off / BLOCK_SIZE, &(bool){0});
+        Block *blk = cache->acquire(bno);
+        if (WRITE) {
+            memcpy(blk->data + *off % BLOCK_SIZE, buf, len);
+            cache->sync(ctx, blk);
+        } else
+            memcpy(buf, blk->data + *off % BLOCK_SIZE, len);
+        cache->release(blk);
+        buf += len;
+        *off += len;
+    }
+}
 
 // see `inode.h`.
 static usize inode_read(Inode *inode, u8 *dest, usize offset, usize count) {
@@ -291,7 +294,7 @@ static usize inode_read(Inode *inode, u8 *dest, usize offset, usize count) {
     ASSERT(end <= entry->num_bytes);
     ASSERT(offset <= end);
 
-    rw(NULL, dest, false);
+    rw(NULL, inode, dest, &offset, end, false);
     return count;
 }
 
@@ -316,10 +319,10 @@ static usize inode_write(OpContext *ctx,
         inode_sync(ctx, inode, true);
     }
 
-    rw(ctx, src, true);
+    rw(ctx, inode, src, &offset, end, true);
     return count;
 }
-#undef rw
+// #undef rw
 
 // see `inode.h`.
 static usize inode_lookup(Inode *inode, const char *name, usize *index) {
@@ -444,7 +447,7 @@ static Inode *namex(const char *path,
                     OpContext *ctx) {
     Inode *ip;
     if (*path == '/') {
-        ip = inode_get(ROOT_INODE_NO);
+        ip = inodes.root;
     } else {
         ip = inode_share(thisproc()->cwd);
     }
@@ -498,16 +501,16 @@ void stati(Inode *ip, struct stat *st) {
     st->st_nlink = ip->entry.num_links;
     st->st_size = ip->entry.num_bytes;
     switch (ip->entry.type) {
-        case INODE_REGULAR:
-            st->st_mode = S_IFREG;
-            break;
-        case INODE_DIRECTORY:
-            st->st_mode = S_IFDIR;
-            break;
-        case INODE_DEVICE:
-            st->st_mode = 0;
-            break;
-        default:
-            PANIC();
+    case INODE_REGULAR:
+        st->st_mode = S_IFREG;
+        break;
+    case INODE_DIRECTORY:
+        st->st_mode = S_IFDIR;
+        break;
+    case INODE_DEVICE:
+        st->st_mode = 0;
+        break;
+    default:
+        PANIC();
     }
 }

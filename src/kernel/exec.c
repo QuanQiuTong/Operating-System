@@ -113,8 +113,6 @@ int execve(const char *path, char *const argv[], char *const envp[]) {
         }
         copyout(pgdir, (void *)ph.p_vaddr, buf, ph.p_filesz);
 
-        // memset((void *)ph.p_vaddr + ph.p_filesz, 0, ph.p_memsz - ph.p_filesz);
-
         arch_fence();
         arch_dccivac((void *)ph.p_vaddr, ph.p_memsz);
         arch_fence();
@@ -131,7 +129,7 @@ int execve(const char *path, char *const argv[], char *const envp[]) {
     usize argc = push(argv);
     usize envc = push(envp);
 
-    void *newsp = (void *)(((usize)sp - (envc + argc + 4) * 8) / 16 * 16);
+    void *newsp = sp - UPALIGN((envc + argc + 4) * 8);
     copyout(pgdir, newsp, NULL, (void *)sp - newsp);
     attach_pgdir(pgdir);
     arch_tlbi_vmalle1is();
@@ -139,9 +137,17 @@ int execve(const char *path, char *const argv[], char *const envp[]) {
     uint64_t *newargv = newsp + 8;
     uint64_t *newenvp = (void *)newargv + 8 * (argc + 1);
 
-    copyout(pgdir, (void *)newsp, &argc, sizeof(usize));
-    copyout(pgdir, (void *)newsp + 8, newenvp, sizeof(newenvp));
-    copyout(pgdir, (void *)newsp + 8 + 8 * (argc + 1), newargv, sizeof(newargv));
+    for (int i = envc; i--;) {
+        copyout(pgdir, newenvp + i, &sp, sizeof(usize));
+        while (*sp++)
+            ;
+    }
+    for (int i = argc; i--;) {
+        copyout(pgdir, newargv + i, &sp, sizeof(usize));
+        while (*sp++)
+            ;
+    }
+    copyout(pgdir, newsp, &argc, sizeof(usize));
 
     sp = newsp;
     stksz = (USERTOP - (usize)sp + 10 * PAGE_SIZE - 1) / (10 * PAGE_SIZE) * (10 * PAGE_SIZE);

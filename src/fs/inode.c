@@ -453,7 +453,7 @@ static Inode *namex(const char *path,
                     OpContext *ctx) {
     Inode *ip;
     if (*path == '/') {
-        ip = inodes.root;
+        ip = inode_get(ROOT_INODE_NO);
     } else {
         ip = inode_share(thisproc()->cwd);
     }

@@ -31,10 +31,6 @@ struct iovec {
     usize iov_len;  /* Number of bytes to transfer. */
 };
 
-#ifndef NOFILE
-#define NOFILE (int)(sizeof(((struct oftable *)0)->openfile) / sizeof(File *))
-#endif
-
 /**
  * Get the file object by fd. Return null if the fd is invalid.
  */
@@ -57,7 +53,7 @@ int fdalloc(struct file *f) {
             return fd;
         }
     }
-
+    printk("fdalloc: no free file descriptor\n");
     return -1;
 }
 
@@ -70,6 +66,7 @@ define_syscall(ioctl, int fd, u64 request) {
 }
 
 define_syscall(mmap, void *addr, int length, int prot, int flags, int fd, int offset) {
+    printk("- sys_mmap: addr %p, length %d, prot %d, flags %d, fd %d, offset %d\n", addr, length, prot, flags, fd, offset);
     if (addr != NULL) {
         printk("sys_mmap: addr unimplemented\n");
         return -1;
@@ -117,8 +114,12 @@ define_syscall(mmap, void *addr, int length, int prot, int flags, int fd, int of
     struct section *sec = kalloc(sizeof(struct section));
     init_list_node(&sec->stnode);
     sec->flags = ST_FILE;
-    sec->begin = 0;
-    sec->end = size;
+
+    static usize next_addr = 0x100000; // 从 1MB 开始分配
+    sec->begin = next_addr;
+    sec->end = next_addr + size;
+    next_addr += size;
+
     sec->fp = f;
     sec->offset = offset;
     sec->length = size;
@@ -127,7 +128,8 @@ define_syscall(mmap, void *addr, int length, int prot, int flags, int fd, int of
     inodes.unlock(ip);
     bcache.end_op(&ctx);
 
-    return 0;
+    printk("sys_mmap: return %p, sec %p\n", (void*)sec->begin, sec);
+    return sec->begin;
 }
 
 #define for_list(node) for (ListNode *p = node.next; p != &node; p = p->next)
@@ -379,6 +381,8 @@ Inode *create(const char *path, short type, short major, short minor, OpContext 
 }
 
 define_syscall(openat, int dirfd, const char *path, int omode) {
+    printk("sys_openat: path '%s', omode %d\n", path, omode);
+
     int fd;
     struct file *f;
     Inode *ip;
@@ -398,11 +402,13 @@ define_syscall(openat, int dirfd, const char *path, int omode) {
         ip = create(path, INODE_REGULAR, 0, 0, &ctx);
         if (ip == 0) {
             bcache.end_op(&ctx);
+            printk("sys_openat: create failed\n");
             return -1;
         }
     } else {
         if ((ip = namei(path, &ctx)) == 0) {
             bcache.end_op(&ctx);
+            printk("sys_openat: file not found\n");
             return -1;
         }
         inodes.lock(ip);
@@ -414,6 +420,7 @@ define_syscall(openat, int dirfd, const char *path, int omode) {
         inodes.unlock(ip);
         inodes.put(&ctx, ip);
         bcache.end_op(&ctx);
+        printk("sys_openat: fdalloc failed\n");
         return -1;
     }
     inodes.unlock(ip);
@@ -439,6 +446,9 @@ define_syscall(mkdirat, int dirfd, const char *path, int mode) {
         printk("sys_mkdirat: mode unimplemented\n");
         return -1;
     }
+
+    printk("sys_mkdirat: path '%s'\n", path);
+
     OpContext ctx;
     bcache.begin_op(&ctx);
     if ((ip = create(path, INODE_DIRECTORY, 0, 0, &ctx)) == 0) {

@@ -33,6 +33,16 @@ void free_sections(struct pgdir *pd) {
     }
 }
 
+#define REVERSED_PAGES 1024  // Reversed pages
+
+void *alloc_page_for_user() {
+    // while (left_page_cnt() <= REVERSED_PAGES) {
+    //     // TODO
+    //     return NULL;
+    // }
+    return kalloc_page();
+}
+
 /**
  * Increase the heap size of current process by `size`.
  * If `size` is negative, decrease heap size. `size` must
@@ -47,6 +57,16 @@ u64 sbrk(i64 size) {
     struct section *sec = container_of(pd->section_head.next, struct section, stnode);
     u64 old_end = sec->end;
 
+    if (size > 0) {  // todo: lazy allocation
+        for (i64 i = 0; i < size; i += PAGE_SIZE) {
+            void *new_page = alloc_page_for_user();
+            if (!new_page) {
+                return -1;
+            }
+            *get_pte(pd, sec->end + i, true) = K2P(new_page) | PTE_USER_DATA;
+        }
+    }
+
     sec->end += size;
     if (size < 0) {
         for (i64 i = 0; i < -size; i += PAGE_SIZE) {
@@ -60,16 +80,6 @@ u64 sbrk(i64 size) {
     attach_pgdir(pd);
     arch_tlbi_vmalle1is();
     return old_end;
-}
-
-#define REVERSED_PAGES 1024  // Reversed pages
-
-void *alloc_page_for_user() {
-    while (left_page_cnt() <= REVERSED_PAGES) {
-        // TODO
-        return NULL;
-    }
-    return kalloc_page();
 }
 
 /* // caller must have the pd->lock
@@ -103,15 +113,16 @@ static void swapout(struct pgdir *pd, struct section *st) {
 
 #define SWAP_START 800
 #define SWAP_END 1000
-static bool inuse[SWAP_END-SWAP_START];
+static bool inuse[SWAP_END - SWAP_START];
 void release_8_blocks(u32 bno) {
     bno -= SWAP_START;
     for (int i = 0; i < 8; i++) {
         inuse[bno + i] = 0;
     }
 }
-void read_page_from_disk(void* ka, u32 bno){
-    for (int i=0;i<8;i++) block_device.read(bno+i,(u8*)ka+i*512);
+void read_page_from_disk(void *ka, u32 bno) {
+    for (int i = 0; i < 8; i++)
+        block_device.read(bno + i, (u8 *)ka + i * 512);
 }
 // Free 8 continuous disk blocks
 static void swapin(struct pgdir *pd, struct section *st) {
@@ -133,6 +144,12 @@ static void swapin(struct pgdir *pd, struct section *st) {
     st->flags &= ~ST_SWAP;
     // post_sem(&st->sleeplock);
 }
+
+#define USERTOP (1 + ~KSPACE_MASK) // 0x0001000000000000
+#define USTACK_SIZE (16 * PAGE_SIZE)
+#define USER_STACK_TOP (USERTOP - USTACK_SIZE)
+#define MIN_STACK_SIZE (4 * PAGE_SIZE)
+
 int pgfault_handler(u64 iss) {
     Proc *p = thisproc();
     struct pgdir *pd = &p->pgdir;
@@ -145,16 +162,42 @@ int pgfault_handler(u64 iss) {
      * 3. Handle the page fault accordingly.
      * 4. Return to user code or kill the process.
      */
+    printk("\e[0;31m""pgfault_handler: proc=%p, addr=%llx\n""\e[0m", p, addr);
+
+    if ((addr & KSPACE_MASK) || addr < MIN_STACK_SIZE) {
+        printk("Invalid memory access <1> at %llx\n", addr);
+        goto bad;
+    }
 
     struct section *sec = NULL;
     for_list(pd->section_head) {
+        if (p->next == pd->section_head.next)
+            break;
         sec = container_of(p, struct section, stnode);
+        printk("sec: %llx %llx %llx\n", sec->begin, sec->end, sec->flags);
         if (addr >= sec->begin && addr < sec->end) {
             break;
         }
     }
 
     if (!sec || addr < sec->begin || addr >= sec->end) {
+         // 检查是否为栈访问
+        if (addr >= (USER_STACK_TOP - USTACK_SIZE) && addr < USER_STACK_TOP) {
+            // 合法的栈访问，按需分配页面
+            PTEntry *pte = get_pte(pd, addr, true);
+            if (!pte) {
+                goto bad;
+            }
+            void *new_page = alloc_page_for_user();
+            if (!new_page) {
+                goto bad;
+            }
+            *pte = K2P(new_page) | PTE_USER_DATA;
+            attach_pgdir(pd);
+            arch_tlbi_vmalle1is();
+            return iss;
+        }
+        
         printk("Invalid memory access at %llx\n", addr);
         goto bad;
     }
@@ -199,7 +242,10 @@ bad:
 void copy_sections(ListNode *from_head, ListNode *to_head) {
     printk("copy_sections\n");
     for_list((*from_head)) {
+        if(p->next == from_head->next)
+            break;
         struct section *from_sec = container_of(p, struct section, stnode);
+        printk("sec: %llx %llx %llx\n", from_sec->begin, from_sec->end, from_sec->flags);
         struct section *to_sec = kalloc(sizeof(struct section));
         _insert_into_list(to_head, &to_sec->stnode);
         to_sec->begin = from_sec->begin;

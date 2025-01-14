@@ -54,6 +54,8 @@ void init_proc(Proc *p) {
     p->kstack = memset(kalloc_page(), 0, PAGE_SIZE);
     p->ucontext = (UserContext *)((u64)p->kstack + PAGE_SIZE - 16 - sizeof(UserContext));
     p->kcontext = (KernelContext *)((u64)p->ucontext - sizeof(KernelContext));
+    init_oftable(&p->oftable);
+    p->cwd = inodes.root;
 }
 
 Proc *create_proc() {
@@ -247,10 +249,6 @@ struct pgdir*vm_copy(struct pgdir*pgdir){
     return newpgdir;
 }
 
-#ifndef NOFILE
-#define NOFILE (sizeof(((struct oftable *)0)->openfile) / sizeof(File *))
-#endif
-
 /*
  * Create a new process copying p as the parent.
  * Sets up stack to return as if from system call.
@@ -271,8 +269,8 @@ int fork() {
         return -1;
     }
     Proc *cp = thisproc();
-    struct pgdir *temp = vm_copy(&cp->pgdir);
-    if (temp == NULL) {
+    struct pgdir *new_pd = vm_copy(&cp->pgdir);
+    if (new_pd == NULL) {
         // attention
         kfree(np->kstack);
         acquire_spinlock(&plock);
@@ -280,7 +278,12 @@ int fork() {
         release_spinlock(&plock);
         return -1;
     }
-    np->pgdir = *temp;
+
+    copy_sections(&cp->pgdir.section_head, &np->pgdir.section_head);
+
+    np->pgdir = *new_pd;
+    kfree(new_pd);
+    
     np->parent = cp;
     memcpy(np->ucontext, cp->ucontext, sizeof(*np->ucontext));
     // Fork returns 0 in the child.
@@ -289,10 +292,9 @@ int fork() {
         if (cp->oftable.openfile[i])
             np->oftable.openfile[i] = file_dup(cp->oftable.openfile[i]);
     np->cwd = inodes.share(cp->cwd);
-    int pid = np->pid;
+
     acquire_spinlock(&plock);
     _insert_into_list(&cp->children, &np->ptnode);
     release_spinlock(&plock);
-    start_proc(np, trap_return, 0);
-    return pid;
+    return start_proc(np, trap_return, 0);
 }

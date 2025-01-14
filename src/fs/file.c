@@ -8,7 +8,7 @@
 #include <kernel/mem.h>
 
 // the global file table.
-static struct ftable ftable;
+static struct ftable ftable = {.lock = {0}, .filelist = {{0}}};
 
 void init_ftable() {
     // initialize your ftable.
@@ -17,7 +17,7 @@ void init_ftable() {
 
 void init_oftable(struct oftable *oftable) {
     // initialize your oftable for a new process.
-    for (usize i = 0; i < sizeof(oftable->openfile) / sizeof(*oftable->openfile); ++i) {
+    for (usize i = 0; i < NOFILE; ++i) {
         oftable->openfile[i] = NULL;
     }
 }

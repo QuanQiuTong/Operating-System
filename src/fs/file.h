@@ -36,9 +36,11 @@ struct ftable {
     File filelist[NFILE];
 };
 
+#define NOFILE 16
+
 struct oftable {
     // table of opened file descriptors in a process
-    File* openfile[16];
+    File* openfile[NOFILE];
 };
 
 // initialize the global file table.

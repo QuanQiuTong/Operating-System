@@ -12,7 +12,8 @@
 #include <kernel/sched.h>
 #include <kernel/syscall.h>
 
-#define USERTOP (1 + ~KSPACE_MASK)
+#define USERTOP (1 + ~KSPACE_MASK)  // 0x0001000000000000
+#define USTACK_SIZE (16 * PAGE_SIZE)
 #define UPALIGN(x) (((x) + 0xf) & ~0xf)
 
 #define push(argv) ({                                      \
@@ -46,20 +47,14 @@ static ALWAYS_INLINE void arch_dccivac(void *p, int n) {
 
 extern int fdalloc(struct file *f);
 
-int execve(const char *path, char *const argv[], char *const envp[]) {
-    struct pgdir *const pgdir = kalloc(sizeof(struct pgdir));
-    if (pgdir == NULL) {
-        return -1;
-    }
-    init_pgdir(pgdir);
-
+static ALWAYS_INLINE bool load_elf(struct pgdir *pgdir, const char *path, Elf64_Ehdr *elf_out) {
     // 打开和检查ELF文件
     OpContext ctx;
     bcache.begin_op(&ctx);
     Inode *ip = namei(path, &ctx);
     if (ip == NULL) {
         bcache.end_op(&ctx);
-        goto bad;
+        return false;
     }
     inodes.lock(ip);
 
@@ -68,16 +63,14 @@ int execve(const char *path, char *const argv[], char *const envp[]) {
     if (inodes.read(ip, (u8 *)&elf, 0, sizeof(elf)) != sizeof(elf)) {
         goto bad;
     }
-    if (!(elf.e_ident[EI_MAG0] == ELFMAG0 && elf.e_ident[EI_MAG1] == ELFMAG1 && elf.e_ident[EI_MAG2] == ELFMAG2 && elf.e_ident[EI_MAG3] == ELFMAG3)) {
+    if (!(elf.e_ident[EI_MAG0] == ELFMAG0 && elf.e_ident[EI_MAG1] == ELFMAG1 &&
+          elf.e_ident[EI_MAG2] == ELFMAG2 && elf.e_ident[EI_MAG3] == ELFMAG3)) {
         goto bad;
     }
     if (elf.e_ident[EI_CLASS] != ELFCLASS64) {
         goto bad;
     }
 
-    Proc *curproc = thisproc();
-    struct pgdir oldpigdir = curproc->pgdir;
-    curproc->pgdir = *pgdir;
     Elf64_Phdr ph;
     u64 sz = 0, base = 0, stksz = 0;
     bool first = true;
@@ -95,7 +88,7 @@ int execve(const char *path, char *const argv[], char *const envp[]) {
             PANIC();
         }
         if (first) {
-            first = 0;
+            first = false;
             sz = base = ph.p_vaddr;
             if (base % PAGE_SIZE != 0) {
                 PANIC();
@@ -117,40 +110,88 @@ int execve(const char *path, char *const argv[], char *const envp[]) {
         arch_dccivac((void *)ph.p_vaddr, ph.p_memsz);
         arch_fence();
     }
+
+    *elf_out = elf;
+
     inodes.unlock(ip);
     inodes.put(&ctx, ip);
     bcache.end_op(&ctx);
-    ip = NULL;
+    return true;
 
-    attach_pgdir(&oldpigdir);
-    arch_tlbi_vmalle1is();
+bad:
+    inodes.unlock(ip);
+    inodes.put(&ctx, ip);
+    bcache.end_op(&ctx);
+    return false;
+}
 
-    char *sp = (char *)USERTOP;
-    usize argc = push(argv);
-    usize envc = push(envp);
+#include <kernel/printk.h>
 
-    void *newsp = sp - UPALIGN((envc + argc + 4) * 8);
-    copyout(pgdir, newsp, NULL, (void *)sp - newsp);
-    attach_pgdir(pgdir);
-    arch_tlbi_vmalle1is();
+int execve(const char *path, char *const argv[], char *const envp[]) {
+    printk("\e[0;36m""execve %s\n""\e[0m", path);
 
-    uint64_t *newargv = newsp + 8;
-    uint64_t *newenvp = (void *)newargv + 8 * (argc + 1);
-
-    for (int i = envc; i--;) {
-        copyout(pgdir, newenvp + i, &sp, sizeof(usize));
-        while (*sp++)
-            ;
+    struct pgdir *const pgdir = kalloc(sizeof(struct pgdir));
+    if (pgdir == NULL) {
+        return -1;
     }
-    for (int i = argc; i--;) {
-        copyout(pgdir, newargv + i, &sp, sizeof(usize));
-        while (*sp++)
-            ;
-    }
-    copyout(pgdir, newsp, &argc, sizeof(usize));
+    init_pgdir(pgdir);
 
-    sp = newsp;
-    stksz = (USERTOP - (usize)sp + 10 * PAGE_SIZE - 1) / (10 * PAGE_SIZE) * (10 * PAGE_SIZE);
+    Elf64_Ehdr elf;
+    if (!load_elf(pgdir, path, &elf)) {
+        printk("load_elf failed\n");
+        goto bad;
+    }
+
+    Proc *curproc = thisproc();
+    struct pgdir oldpd = curproc->pgdir;
+    attach_pgdir(&oldpd);
+    arch_tlbi_vmalle1is();
+    u64 sp = (USERTOP - USTACK_SIZE);
+    {
+        u64 argc = 0, envc = 0;
+        if (envp)
+            while (envp[envc])
+                ++envc;
+        if (argv)
+            while (argv[argc])
+                ++argc;
+        uint64_t newargv[argc + 1], newenvp[envc + 1];
+
+        sp -= 16;
+        copyout(pgdir, (void *)sp, 0, 8);
+        if (envp) {
+            for (int i = envc - 1; i >= 0; --i) {
+                sp -= strlen(envp[i]) + 1;
+                sp -= (u64)sp % 16;
+                copyout(pgdir, (void *)sp, envp[i], strlen(envp[i]) + 1);
+                newenvp[i] = sp;
+            }
+        }
+        newenvp[envc] = 0;
+
+        sp -= 8;
+        copyout(pgdir, (void *)sp, 0, 8);
+
+        if (argv) {
+            for (int i = argc - 1; i >= 0; --i) {
+                sp -= strlen(argv[i]) + 1;
+                sp -= (u64)sp % 16;
+                copyout(pgdir, (void *)sp, argv[i], strlen(argv[i]) + 1);
+                newargv[i] = sp;
+            }
+        }
+        newargv[argc] = 0;
+
+        sp -= (u64)(envc + 1) * 8;
+        copyout(pgdir, (void *)sp, newenvp, (u64)(envc + 1) * 8);
+        sp -= (u64)(argc + 1) * 8;
+        copyout(pgdir, (void *)sp, newargv, (u64)(argc + 1) * 8);
+        sp -= 8;
+        copyout(pgdir, (void *)sp, &argc, sizeof(argc));
+    }
+
+    // sp = newsp;
+    u64 stksz = (USERTOP - (usize)sp + 10 * PAGE_SIZE - 1) / (10 * PAGE_SIZE) * (10 * PAGE_SIZE);
     copyout(pgdir, (void *)(USERTOP - stksz), 0, stksz - (USERTOP - (usize)sp));
     ASSERT((uint64_t)sp > USERTOP - stksz);
     curproc->pgdir = *pgdir;
@@ -158,18 +199,13 @@ int execve(const char *path, char *const argv[], char *const envp[]) {
     curproc->ucontext->sp = (uint64_t)sp;
     attach_pgdir(&curproc->pgdir);
     arch_tlbi_vmalle1is();
-    free_pgdir(&oldpigdir);
+    free_pgdir(&oldpd);
 
     return 0;
 
 bad:
 
     free_pgdir(pgdir);  // `pgdir` is definitely not NULL.
-    if (ip) {
-        inodes.unlock(ip);
-        inodes.put(&ctx, ip);
-        bcache.end_op(&ctx);
-    }
-    thisproc()->pgdir = oldpigdir;
+    thisproc()->pgdir = oldpd;
     return -1;
 }

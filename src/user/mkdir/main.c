@@ -11,7 +11,7 @@
 
 static void print_help() {
     printf("Usage: mkdir [OPTION]... DIRECTORY...\n");
-    printf("  -m, --mode=MODE       set file mode\n");
+    printf("  -m, --mode=MODE       set file mode (only 0 supported)\n");
     printf("  -p, --parents         create parent directories as needed\n");
     printf("  -v, --verbose         print a message for each created directory\n");
     printf("  -Z, --context=CTX     (NOT implemented) set the SELinux security context of each created directory to CTX\n");
@@ -64,7 +64,9 @@ int main(int argc, char *argv[]) {
         {0, 0, 0, 0}};
 
     bool parents = false, verbose = false;
-    mode_t mode = 0777;
+    // mode_t mode = 0777;
+    // 0777 = S_IRWXU | S_IRWXG | S_IRWXO
+    mode_t mode = 0; // other mode is not supported
     int opt;
 
     while ((opt = getopt_long(argc, argv, "m:pvhVZ:", long_options, NULL)) != -1) {

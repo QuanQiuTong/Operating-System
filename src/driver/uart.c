@@ -12,9 +12,49 @@ static void uartintr()
      * Invoke the console interrupt handler here. 
      * Without this, the shell may fail to properly handle user inputs.
      */
-    char c = uart_get_char();
-    if (c != 0xFF) {
-        console_intr(c);
+    static enum {
+        NONE = 0,
+        ESC,
+        BRACKET,
+    } escape = NONE;
+    char c;
+    while ((c = uart_get_char()) != 0xFF) {
+        switch (escape) {
+        case NONE:
+            if (c == 0x1b) {
+                escape = ESC;
+            } else
+                console_intr(c);
+            break;
+        case ESC:
+            if (c == '[') {
+                escape = BRACKET;
+            } else {
+                // console_intr(0x1b);
+                console_intr(c);
+                escape = NONE;
+            }
+            break;
+        case BRACKET:
+            escape = NONE;
+            switch (c) {
+            case 'A':
+                printk(" * arrow up\n");
+                break;
+            case 'B':
+                printk(" * arrow down\n");
+                break;
+            case 'C':
+                printk(" * arrow right\n");
+                break;
+            case 'D':
+                printk(" * arrow left\n");
+                break;
+            default:
+                break;
+            }
+            break;
+        }
     }
 
     device_put_u32(UART_ICR, 1 << 4 | 1 << 5);

@@ -83,6 +83,11 @@ static SpinLock kalloc_lock[NCPU] = {0};
 #include <kernel/printk.h>
 
 void *kalloc(unsigned long long size) {
+    if(size > PAGE_SIZE / 2) {
+        printk("kalloc: size too large, consider using kalloc_pages or kalloc_large\n");
+        PANIC();
+        return NULL;
+    }
     Node **fr = (size & 0x7) ? free4 : free8;
     size = (size + 3) & ~0x3;
 
@@ -133,4 +138,56 @@ void kfree(void *ptr) {
 
 void *get_zero_page() {
     return NULL;
+}
+typedef struct {
+    u64 npages;
+} PageHeader;
+
+void *kalloc_large(usize size) {
+    usize npages = (size + sizeof(PageHeader) + PAGE_SIZE - 1) / PAGE_SIZE;
+
+    acquire_spinlock(&page_lock);
+
+    if (mm_end + npages * PAGE_SIZE > (char*)P2K(PHYSTOP)) {
+        release_spinlock(&page_lock);
+        return NULL;
+    }
+
+    PageHeader *header = (PageHeader*)mm_end;
+    header->npages = npages;
+
+    void *ret = (void*)(mm_end + sizeof(PageHeader));
+
+    mm_end += npages * PAGE_SIZE;
+
+    __atomic_fetch_add(&kalloc_page_cnt.count, npages, __ATOMIC_ACQ_REL);
+
+    release_spinlock(&page_lock);
+    return ret;
+}
+
+void kfree_large(void *p) {
+    if (p == NULL) {
+        return;
+    }
+
+    PageHeader *header = (PageHeader*)((char*)p - sizeof(PageHeader));
+    int npages = header->npages;
+
+    acquire_spinlock(&page_lock);
+
+    for (int i = 0; i < npages; i++) {
+        void *page = (char*)header + i * PAGE_SIZE;
+        _insert_into_list(&list, page);
+    }
+    __atomic_sub_fetch(&kalloc_page_cnt.count, npages, __ATOMIC_ACQ_REL);
+
+    if ((char*)header + npages * PAGE_SIZE == mm_end) {
+        mm_end -= npages * PAGE_SIZE;
+    } else {
+        // deal with memory fragmentation (optional: merge adjacent free blocks)
+        // Here we simplify the processing and do not merge
+    }
+
+    release_spinlock(&page_lock);
 }

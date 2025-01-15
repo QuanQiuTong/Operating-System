@@ -20,3 +20,9 @@ WARN_RESULT void *kalloc(unsigned long long);
 void kfree(void *);
 
 WARN_RESULT void *get_zero_page();
+
+/**
+ * Allocate large memory, supporting more than one page.
+ */
+WARN_RESULT void *kalloc_large(usize size);
+void kfree_large(void *p);

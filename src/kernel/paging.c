@@ -145,7 +145,7 @@ static void swapin(struct pgdir *pd, struct section *st) {
     // post_sem(&st->sleeplock);
 }
 
-#define USERTOP (1 + ~KSPACE_MASK) // 0x0001000000000000
+#define USERTOP (1 + ~KSPACE_MASK)  // 0x0001000000000000
 #define USTACK_SIZE (16 * PAGE_SIZE)
 #define USER_STACK_TOP (USERTOP - USTACK_SIZE)
 #define MIN_STACK_SIZE (4 * PAGE_SIZE)
@@ -162,7 +162,11 @@ int pgfault_handler(u64 iss) {
      * 3. Handle the page fault accordingly.
      * 4. Return to user code or kill the process.
      */
-    printk("\e[0;31m""pgfault_handler: proc=%p, addr=%llx\n""\e[0m", p, addr);
+    printk(
+        "\e[0;31m"
+        "pgfault_handler: pid=%d, addr=%llx\n"
+        "\e[0m",
+        p->pid, addr);
 
     if ((addr & KSPACE_MASK) || addr < MIN_STACK_SIZE) {
         printk("Invalid memory access <1> at %llx\n", addr);
@@ -171,17 +175,18 @@ int pgfault_handler(u64 iss) {
 
     struct section *sec = NULL;
     for_list(pd->section_head) {
-        if (p->next == pd->section_head.next)
+        if (p == p->next)
             break;
         sec = container_of(p, struct section, stnode);
-        printk("sec: %llx %llx %llx\n", sec->begin, sec->end, sec->flags);
-        if (addr >= sec->begin && addr < sec->end) {
+        printk("sec<1>: %llx %llx %x\n", sec->begin, sec->end, sec->flags);
+
+        if (in_section(sec, addr)) {
             break;
         }
     }
 
-    if (!sec || addr < sec->begin || addr >= sec->end) {
-         // 检查是否为栈访问
+    if (!sec || !in_section(sec, addr)) {
+        // 检查是否为栈访问
         if (addr >= (USER_STACK_TOP - USTACK_SIZE) && addr < USER_STACK_TOP) {
             // 合法的栈访问，按需分配页面
             PTEntry *pte = get_pte(pd, addr, true);
@@ -197,7 +202,7 @@ int pgfault_handler(u64 iss) {
             arch_tlbi_vmalle1is();
             return iss;
         }
-        
+
         printk("Invalid memory access at %llx\n", addr);
         goto bad;
     }
@@ -210,12 +215,29 @@ int pgfault_handler(u64 iss) {
 
     if (*pte == 0) {
         // Lazy allocation
+        printk(" - Lazy allocation\n");
         void *new_page = alloc_page_for_user();
         if (!new_page) {
             printk("Failed to allocate page\n");
             goto bad;
         }
         *pte = K2P(new_page) | PTE_USER_DATA;
+
+        if (sec->flags & ST_FILE) {
+            struct file *f = sec->fp;
+            u64 offset = sec->offset + (addr - sec->begin);
+            inodes.lock(f->ip);
+            int n = inodes.read(f->ip, new_page, offset, PAGE_SIZE);
+            inodes.unlock(f->ip);
+            if (n < 0) {
+                goto bad;
+            }
+            // 如果读取的内容不足一页，将剩余部分清零
+            if (n < PAGE_SIZE) {
+                memset(new_page + n, 0, PAGE_SIZE - n);
+            }
+        }
+
     } else if (*pte & PTE_RO) {
         // Copy on Write
         void *new_page = alloc_page_for_user();
@@ -240,16 +262,31 @@ bad:
 }
 
 void copy_sections(ListNode *from_head, ListNode *to_head) {
-    printk("copy_sections\n");
+    printk("copy_sections %p\n", from_head);
+
     for_list((*from_head)) {
-        if(p->next == from_head->next)
+        if (p == p->next || p->next == from_head->next)
             break;
         struct section *from_sec = container_of(p, struct section, stnode);
-        printk("sec: %llx %llx %llx\n", from_sec->begin, from_sec->end, from_sec->flags);
+        printk("sec<2>: %llx %llx %x\n", from_sec->begin, from_sec->end, from_sec->flags);
         struct section *to_sec = kalloc(sizeof(struct section));
+
+        memmove(to_sec, from_sec, sizeof(struct section));
         _insert_into_list(to_head, &to_sec->stnode);
-        to_sec->begin = from_sec->begin;
-        to_sec->end = from_sec->end;
-        to_sec->flags = from_sec->flags;
+
+        if (from_sec->fp != NULL) {
+            printk(" - file_dup, from_sec->flags=%x\n", from_sec->flags);
+            // 对于MAP_PRIVATE，创建新的文件描述符
+#define MAP_PRIVATE 0x02 /* Changes are private.  */
+
+            if (from_sec->mmap_flags & MAP_PRIVATE) {
+                to_sec->fp = file_dup(from_sec->fp);
+            } else {
+                // MAP_SHARED共享同一个文件描述符
+                to_sec->fp = from_sec->fp;
+            }
+        }
     }
+
+    printk("copy_sections done\n");
 }

@@ -12,7 +12,8 @@
 #define ST_BSS ST_FILE
 
 struct section {
-    u64 flags;
+    int flags;
+    int mmap_flags;
     u64 begin;
     u64 end;
     ListNode stnode;
@@ -23,6 +24,10 @@ struct section {
     u64 offset; // Offset in file
     u64 length; // Length of mapped content in file
 };
+
+inline bool in_section(struct section *sec, u64 addr) {
+    return addr >= sec->begin && addr < sec->end;
+} 
 
 int pgfault_handler(u64 iss);
 void init_sections(ListNode *section_head);

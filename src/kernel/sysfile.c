@@ -65,8 +65,12 @@ define_syscall(ioctl, int fd, u64 request) {
     return 0;
 }
 
-define_syscall(mmap, void *addr, int length, int prot, int flags, int fd, int offset) {
-    printk("- sys_mmap: addr %p, length %d, prot %d, flags %d, fd %d, offset %d\n", addr, length, prot, flags, fd, offset);
+define_syscall(mmap, void *addr, size_t length, int prot, int flags, int fd, off_t offset) {
+    printk(
+        "\e[0;33m"
+        "sys_mmap: addr %p, length %lld, prot %d, flags %d, fd %d, offset %lld\n"
+        "\e[0m",
+        addr, (long long)length, prot, flags, fd, (long long)offset);
     if (addr != NULL) {
         printk("sys_mmap: addr unimplemented\n");
         return -1;
@@ -87,6 +91,12 @@ define_syscall(mmap, void *addr, int length, int prot, int flags, int fd, int of
     struct file *f = fd2file(fd);
     if (!f) {
         printk("sys_mmap: fd2file failed\n");
+        return -1;
+    }
+
+    // 只有 MAP_SHARED 且需要写权限时才检查文件的写权限
+    if ((flags & MAP_SHARED) && (prot & PROT_WRITE) && !(f->writable)) {
+        printk("sys_mmap: cannot write to read-only file mapping\n");
         return -1;
     }
 
@@ -114,13 +124,15 @@ define_syscall(mmap, void *addr, int length, int prot, int flags, int fd, int of
     struct section *sec = kalloc(sizeof(struct section));
     init_list_node(&sec->stnode);
     sec->flags = ST_FILE;
+    sec->mmap_flags = flags;
 
-    static usize next_addr = 0x100000; // 从 1MB 开始分配
+    static usize next_addr = 0x100000;  // 从 1MB 开始分配
     sec->begin = next_addr;
     sec->end = next_addr + size;
     next_addr += size;
 
     sec->fp = f;
+    file_dup(f);
     sec->offset = offset;
     sec->length = size;
     _insert_into_list(&thisproc()->pgdir.section_head, &sec->stnode);
@@ -128,42 +140,63 @@ define_syscall(mmap, void *addr, int length, int prot, int flags, int fd, int of
     inodes.unlock(ip);
     bcache.end_op(&ctx);
 
-    printk("sys_mmap: return %p, sec %p\n", (void*)sec->begin, sec);
+    printk("sys_mmap: return %p, sec %p\n", (void *)sec->begin, sec);
     return sec->begin;
 }
 
-#define for_list(node) for (ListNode *p = node.next; p != &node; p = p->next)
+#define LOG(fmt, ...) printk("\e[0;32m[%s] " fmt "\e[0m\n", __func__, ##__VA_ARGS__)
 
-define_syscall(munmap, void *addr, size_t length) {
-    if (addr != NULL) {
-        printk("sys_munmap: addr unimplemented\n");
+#define for_list(node) for (ListNode *h = &node, *p = h->next; p != h; p = p->next)
+
+define_syscall(munmap, u64 addr, size_t length) {
+    LOG("addr %llx, length %llx\n", addr, (long long)length);
+
+    if (length == 0)
         return -1;
-    }
-    if (length <= 0) {
-        printk("sys_munmap: length unimplemented\n");
-        return -1;
-    }
+
+    u64 aligned_addr = round_down(addr, PAGE_SIZE);
+    u64 aligned_len = round_up(length, PAGE_SIZE);
 
     struct section *sec = NULL;
     for_list(thisproc()->pgdir.section_head) {
         sec = container_of(p, struct section, stnode);
-        if (addr >= (void *)sec->begin && addr < (void *)sec->end) {
+        if (in_section(sec, addr)) {
             break;
         }
     }
 
-    if (!sec || addr < (void *)sec->begin || addr >= (void *)sec->end) {
-        printk("sys_munmap: Invalid memory access at %p\n", addr);
+    if (!sec || !in_section(sec, addr)) {
+        LOG("Invalid memory access at %llx\n", addr);
         return -1;
     }
 
-    if (length != sec->end - sec->begin) {
-        printk("sys_munmap: length is not equal to the section size\n");
-        return -1;
+    if (sec->mmap_flags & MAP_SHARED) {
+        for (u64 va = aligned_addr; va < aligned_addr + aligned_len; va += PAGE_SIZE) {
+            PTEntry *pte = get_pte(&thisproc()->pgdir, va, false);
+            if (pte && *pte) {
+                void *pa = (void *)P2K(PTE_ADDRESS(*pte));
+                usize offset = sec->offset + (va - sec->begin);
+                inodes.write(NULL, sec->fp->ip, pa, offset, PAGE_SIZE);
+            }
+        }
     }
 
-    _detach_from_list(&sec->stnode);
-    kfree(sec);
+    for (u64 va = aligned_addr; va < aligned_addr + aligned_len; va += PAGE_SIZE) {
+        PTEntry *pte = get_pte(&thisproc()->pgdir, va, false);
+        if (pte && *pte) {
+            kfree_page((void *)P2K(PTE_ADDRESS(*pte)));
+            *pte = 0;
+        }
+    }
+
+    if (aligned_addr == sec->begin && aligned_addr + aligned_len >= sec->end) {
+        _detach_from_list(&sec->stnode);
+        if (sec->fp) {
+            file_close(sec->fp);
+        }
+        kfree(sec);
+    }
+
     return 0;
 }
 

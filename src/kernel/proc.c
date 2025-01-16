@@ -159,6 +159,20 @@ NO_RETURN void exit(int code) {
     Proc *this = thisproc();
     ASSERT(this != &root_proc);
     this->exitcode = code;
+
+    for (int i = 0; i < NOFILE; ++i) {
+        if (this->oftable.openfile[i]) {
+            file_close(this->oftable.openfile[i]);
+            this->oftable.openfile[i] = NULL;
+        }
+    }
+
+    OpContext ctx;
+    bcache.begin_op(&ctx);
+    inodes.put(&ctx, this->cwd);
+    bcache.end_op(&ctx);
+    this->cwd = NULL;
+
     post_sem(&this->parent->childexit);
 
     int zcnt = 0;

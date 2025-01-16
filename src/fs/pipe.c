@@ -6,8 +6,8 @@
 
 static ALWAYS_INLINE void init_pipe(Pipe *pi) {
     init_spinlock(&pi->lock);
-    init_sleeplock(&pi->wlock);
-    init_sleeplock(&pi->rlock);
+    init_sem(&pi->wlock, 0);
+    init_sem(&pi->rlock, 0);
     // memset(pi->data, 0, PIPE_SIZE);
     pi->nread = 0;
     pi->nwrite = 0;
@@ -64,7 +64,7 @@ void pipe_close(Pipe *pi, int writable) {
         post_sem(&pi->wlock);
     }
     if (pi->readopen == 0 && pi->writeopen == 0) {
-        release_spinlock(&pi->lock);
+        // release_spinlock(&pi->lock); // nobody would use this anymore
         kfree((void *)pi);
     } else {
         release_spinlock(&pi->lock);
@@ -73,12 +73,13 @@ void pipe_close(Pipe *pi, int writable) {
 
 int pipe_write(Pipe *pi, u64 addr, int n) {
     acquire_spinlock(&pi->lock);
-    for (int i = 0; i < n; i++) {
+    int i = 0;
+    for (; i < n; i++) {
+        if (pi->readopen == 0 || thisproc()->killed) {
+            release_spinlock(&pi->lock);
+            return -1;
+        }
         while (pi->nwrite == pi->nread + PIPE_SIZE) {
-            if (pi->readopen == 0 || thisproc()->killed) {
-                release_spinlock(&pi->lock);
-                return -1;
-            }
             post_sem(&pi->rlock);
             release_spinlock(&pi->lock);
             unalertable_wait_sem(&pi->wlock);
@@ -87,7 +88,7 @@ int pipe_write(Pipe *pi, u64 addr, int n) {
     }
     post_sem(&pi->rlock);
     release_spinlock(&pi->lock);
-    return n;
+    return i;
 }
 
 int pipe_read(Pipe *pi, u64 addr, int n) {
@@ -100,8 +101,8 @@ int pipe_read(Pipe *pi, u64 addr, int n) {
         release_spinlock(&pi->lock);
         unalertable_wait_sem(&pi->rlock);
     }
-    int i;
-    for (i = 0; i < n && pi->nread != pi->nwrite; i++) {
+    int i = 0;
+    for (; i < n && pi->nread != pi->nwrite; i++) {
         *((char *)addr + i) = pi->data[pi->nread++ % PIPE_SIZE];
     }
     post_sem(&pi->wlock);

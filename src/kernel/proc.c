@@ -110,7 +110,7 @@ int start_proc(Proc *p, void (*entry)(u64), u64 arg) {
     id;                                        \
 })
 
-#define for_list(node) for (ListNode *p = node.next; p != &node; p = p->next)
+#define for_list(list) for (ListNode *p = list.next; p != &list; p = p->next)
 
 int wait(int *exitcode) {
     /// @note be careful of concurrency
@@ -210,16 +210,11 @@ int kill(int pid) {
     return -1;
 }
 
-struct pgdir*vm_copy(struct pgdir*pgdir){
-    struct pgdir* newpgdir = kalloc(sizeof(struct pgdir));
-    init_pgdir(newpgdir);
-    if (!newpgdir)
-        return 0;
-
+static ALWAYS_INLINE void ptcopy(struct pgdir *dst, PTEntriesPtr src) {
     for (int i = 0; i < N_PTE_PER_TABLE; i++)
-        if (pgdir->pt[i] & PTE_VALID) {
-            ASSERT(pgdir->pt[i] & PTE_TABLE);
-            PTEntriesPtr pgt1 = (PTEntriesPtr)P2K(PTE_ADDRESS(pgdir->pt[i]));
+        if (src[i] & PTE_VALID) {
+            ASSERT(src[i] & PTE_TABLE);
+            PTEntriesPtr pgt1 = (PTEntriesPtr)P2K(PTE_ADDRESS(src[i]));
             for (int i1 = 0; i1 < N_PTE_PER_TABLE; i1++)
                 if (pgt1[i1] & PTE_VALID) {
                     ASSERT(pgt1[i1] & PTE_TABLE);
@@ -233,20 +228,19 @@ struct pgdir*vm_copy(struct pgdir*pgdir){
                                     ASSERT(pgt3[i3] & PTE_PAGE);
                                     ASSERT(pgt3[i3] & PTE_USER);
                                     ASSERT(pgt3[i3] & PTE_NORMAL);
-                                    u64 va =(u64)i<<(12+9*3)|(u64)i1<<(12+9*2)|(u64)i2<<(12+9)|i3<<12;
+                                    u64 va = (u64)i << (12 + 9 * 3) | (u64)i1 << (12 + 9 * 2) | (u64)i2 << (12 + 9) | i3 << 12;
                                     // u64 pa = P2K(PTE_ADDRESS(pgt3[i3]));
                                     // vmmap_without_changepd(newpgdir,va,(void*)pa,PTE_RO|PTE_USER_DATA);
-                                    u64 pa=PTE_ADDRESS(pgt3[i3]);
-                                    void* np=kalloc_page();
+                                    u64 pa = PTE_ADDRESS(pgt3[i3]);
+                                    void *np = kalloc_page();
                                     ASSERT(np);
-                                    memmove(np,(void*)P2K(pa),PAGE_SIZE);
-                                    auto pte = get_pte(newpgdir, va, true);
+                                    memmove(np, (void *)P2K(pa), PAGE_SIZE);
+                                    auto pte = get_pte(dst, va, true);
                                     *pte = K2P(np) | PTE_USER_DATA;
                                 }
                         }
                 }
         }
-    return newpgdir;
 }
 
 /*
@@ -259,7 +253,7 @@ int fork() {
      * 1. Create a new child process.
      * 2. Copy the parent's memory space.
      * 3. Copy the parent's trapframe.
-     * 4. Set the parent of the new proc to the parent of the parent.
+     * 4. Set the parent of the new proc to current proc.
      * 5. Set the state of the new proc to RUNNABLE.
      * 6. Activate the new proc and return its pid.
      */
@@ -269,22 +263,11 @@ int fork() {
         return -1;
     }
     Proc *cp = thisproc();
-    struct pgdir *new_pd = vm_copy(&cp->pgdir);
-    if (new_pd == NULL) {
-        // attention
-        kfree(np->kstack);
-        acquire_spinlock(&plock);
-        np->state = UNUSED;
-        release_spinlock(&plock);
-        return -1;
-    }
-
+   
+    ptcopy(&np->pgdir, cp->pgdir.pt); // (&cp->pgdir)->pt
     copy_sections(&cp->pgdir.section_head, &np->pgdir.section_head);
 
-    np->pgdir = *new_pd;
-    kfree(new_pd);
-    
-    np->parent = cp;
+    set_parent_to_this(np);
     memcpy(np->ucontext, cp->ucontext, sizeof(*np->ucontext));
     // Fork returns 0 in the child.
     np->ucontext->x[0] = 0;
@@ -293,8 +276,5 @@ int fork() {
             np->oftable.openfile[i] = file_dup(cp->oftable.openfile[i]);
     np->cwd = inodes.share(cp->cwd);
 
-    acquire_spinlock(&plock);
-    _insert_into_list(&cp->children, &np->ptnode);
-    release_spinlock(&plock);
     return start_proc(np, trap_return, 0);
 }

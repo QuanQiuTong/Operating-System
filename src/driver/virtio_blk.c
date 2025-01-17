@@ -114,14 +114,16 @@ int virtio_blk_rw(Buf *b)
     REG(VIRTIO_REG_QUEUE_NOTIFY) = 0;
     arch_fence();
 
-    release_spinlock(&disk.lk);
-    if (!wait_sem(&b->sem)) {
-        printk("[Virtio]: Disk operation failed.");
-        PANIC(); // return -1;
+    while (!disk.virtq.info[d0].done) {
+        release_spinlock(&disk.lk);
+        if (!wait_sem(&b->sem)) {
+            printk("[Virtio]: Disk operation failed.");
+            PANIC();  // return -1;
+        }
+        // Semaphores needn't check the condition again, so 'while' is not needed here.
+        ASSERT(b->flags & B_VALID);
+        acquire_spinlock(&disk.lk);
     }
-    // Semaphores needn't check the condition again, so 'while' is not needed here.
-    ASSERT(b->flags & B_VALID);
-    acquire_spinlock(&disk.lk);
 
     disk.virtq.info[d0].done = 0;
     free_desc(&disk.virtq, d0);
@@ -153,6 +155,8 @@ static void virtio_blk_intr()
         if(b->flags & B_DIRTY)
             b->flags &= ~B_DIRTY;
         b->flags |= B_VALID;
+
+        disk.virtq.info[d0].done = 1;
         post_sem(&b->sem);
 
         disk.virtq.info[d0].buf = NULL;

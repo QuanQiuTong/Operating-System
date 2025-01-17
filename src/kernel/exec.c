@@ -206,6 +206,5 @@ int execve(const char *path, char *const argv[], char *const envp[]) {
 bad:
 
     free_pgdir(pgdir);  // `pgdir` is definitely not NULL.
-    thisproc()->pgdir = oldpd;
     return -1;
 }

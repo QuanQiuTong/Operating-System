@@ -154,8 +154,6 @@ NO_RETURN void exit(int code) {
     //  5. sched(ZOMBIE)
     /// @note be careful of concurrency
 
-    acquire_spinlock(&plock);
-
     Proc *this = thisproc();
     ASSERT(this != &root_proc);
     this->exitcode = code;
@@ -173,6 +171,7 @@ NO_RETURN void exit(int code) {
     bcache.end_op(&ctx);
     this->cwd = NULL;
 
+    acquire_spinlock(&plock);
     post_sem(&this->parent->childexit);
 
     int zcnt = 0;
@@ -277,9 +276,11 @@ int fork() {
         return -1;
     }
     Proc *cp = thisproc();
-   
+
+    acquire_spinlock(&cp->pgdir.lock);
     ptcopy(&np->pgdir, cp->pgdir.pt); // (&cp->pgdir)->pt
     copy_sections(&cp->pgdir.section_head, &np->pgdir.section_head);
+    release_spinlock(&cp->pgdir.lock);
 
     set_parent_to_this(np);
     memcpy(np->ucontext, cp->ucontext, sizeof(*np->ucontext));

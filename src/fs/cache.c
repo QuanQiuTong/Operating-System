@@ -5,67 +5,22 @@
 #include <kernel/printk.h>
 #include <kernel/proc.h>
 
-/**
-    @brief the private reference to the super block.
-
-    @note we need these two variables because we allow the caller to
-            specify the block device and super block to use.
-            Correspondingly, you should NEVER use global instance of
-            them, e.g. `get_super_block`, `block_device`
-
-    @see init_bcache
- */
 static const SuperBlock *sblock;
-
-/**
-    @brief the reference to the underlying block device.
- */
 static const BlockDevice *device;
 
-/**
-    @brief global lock for block cache.
-
-    Use it to protect anything you need.
-
-    e.g. the list of allocated blocks, etc.
- */
-static SpinLock lock;
-
-/**
-    @brief the list of all allocated in-memory block.
-
-    We use a linked list to manage all allocated cached blocks.
-
-    You can implement your own data structure if you like better performance.
-
-    @see Block
- */
-static ListNode head;
-
+static SpinLock lock;     // protects block cache.
+static ListNode head;     // the list of all allocated in-memory block.
 static LogHeader header;  // in-memory copy of log header block.
+static usize cache_cnt;
 
-static SpinLock bitmaplock;
-
-static usize blocknum;  // the number of blocks in the block cache.
-
-/**
-    @brief a struct to maintain other logging states.
-
-    You may wonder where we store some states, e.g.
-
-    * how many atomic operations are running?
-    * are we checkpointing?
-    * how to notify `end_op` that a checkpoint is done?
-
-    Put them here!
-
-    @see cache_begin_op, cache_end_op, cache_sync
- */
 struct {
-    // if on commit, lock.locked == true.
-    SpinLock lock;
-    unsigned outstanding;
-    Semaphore sem;
+    int max_size;
+    int outstanding;
+    int log_used;
+    bool committing;
+    SpinLock log_lock;
+    Semaphore log_sem;
+    Semaphore log_commit_sem;
 } log;
 
 // read the content from disk.
@@ -102,206 +57,259 @@ static __attribute__((unused)) void init_block(Block *block) {
 
 // see `cache.h`.
 static usize get_num_cached_blocks() {
-    return blocknum;
+    return cache_cnt;
 }
 
-#define cond_wait(cond, lock) ( \
-    release_spinlock(lock), unalertable_wait_sem(cond), acquire_spinlock(lock))
-
-#define for_list(node) for (ListNode *p = node.next; p != &node; p = p->next)
-
 // see `cache.h`.
-static Block *cache_acquire(usize block_no) {
-    acquire_spinlock(&lock);
-
-    for_list(head) {
-        Block *blk = container_of(p, Block, node);
-        if (blk->block_no == block_no) {
-            blk->acquired = 1;
-            cond_wait(&blk->lock, &lock);
-
-            _detach_from_list(&blk->node);
-            _merge_list(&head, &blk->node);
-
-            release_spinlock(&lock);
-            return blk;
-        }
-    }
-
-    for (ListNode *p = head.prev;
-         blocknum >= EVICTION_THRESHOLD && p != &head;) {
-        Block *blk = container_of(p, Block, node);
-        if (blk->acquired || blk->pinned) {
+// caller should acquire lock of cache list
+void LRU_shrink() {
+    Block *cached_block = NULL;
+    ListNode *p = head.prev;
+    while (get_num_cached_blocks() >= EVICTION_THRESHOLD && p != &head) {
+        cached_block = container_of(p, Block, node);
+        if (!cached_block->pinned && !cached_block->acquired) {
+            p = _detach_from_list(p);
+            kfree(cached_block);
+            --cache_cnt;
+        } else {
             p = p->prev;
-            continue;
         }
-        p = _detach_from_list(p);
-        kfree(blk);
-        blocknum--;
     }
-    blocknum++;
-
-    Block *b = kalloc(sizeof(Block));
-
-    b->block_no = block_no,
-    b->acquired = true,
-    b->pinned = false,
-    b->valid = true,
-    init_sleeplock(&b->lock);
-    _insert_into_list(&head, &b->node);
-
-    if (!acquire_sleeplock(&b->lock))
-        PANIC();
-
-    device_read(b);
+}
+Proc *thisproc();
+static Block *cache_acquire(usize block_no) {
+    bool if_back = false;
+__back:
+    acquire_spinlock(&lock);
+    // printk("A");
+    ListNode *p = head.next;
+    Block *cached_block = NULL;
+    bool hit = false;
+    while (p != &head) {
+        cached_block = container_of(p, Block, node);
+        if (cached_block->block_no == block_no) {
+            hit = true;
+            break;
+        }
+        p = p->next;
+    }
+    if (hit) {
+        if (cached_block->acquired) {
+            release_spinlock(&lock);
+            unalertable_wait_sem(&(cached_block->lock));  //_acquire_sleeplock(&cached_block->lock);
+            if_back = true;
+            goto __back;  // ensure the cached_block is still there after sleep
+        }
+        _detach_from_list(p);
+        _merge_list(&head, p);  // for LRU
+    } else {
+        if (get_num_cached_blocks() >= EVICTION_THRESHOLD) {
+            LRU_shrink();
+        }
+        cached_block = (Block *)kalloc(sizeof(Block));
+        ++cache_cnt;
+        init_block(cached_block);
+        cached_block->block_no = block_no;
+        release_spinlock(&lock);
+        device_read(cached_block);
+        acquire_spinlock(&lock);
+        cached_block->valid = true;
+        _merge_list(&head, &(cached_block->node));  // for LRU
+    }
+    if (!hit || !if_back) {  // this lock can certainly get without wait
+        get_sem(&(cached_block->lock));
+    }
+    cached_block->acquired = true;
     release_spinlock(&lock);
-    return b;
+    return cached_block;
 }
 
 // see `cache.h`.
 static void cache_release(Block *block) {
     acquire_spinlock(&lock);
-    block->acquired = 0;
-    release_sleeplock(&block->lock);
+    block->acquired = false;
+    post_sem(&(block->lock));
     release_spinlock(&lock);
 }
 
-static void blockcopy(usize src_no, usize dst_no) {
-    Block *src = cache_acquire(src_no);
-    Block *dest = cache_acquire(dst_no);
-
-    memcpy(dest->data, src->data, BLOCK_SIZE);
-
-    cache_release(src);
-
-    device_write(dest);
-    cache_release(dest);
+void recover_from_log() {
+    read_header();
+    for (usize i = 0; i < header.num_blocks; ++i) {
+        Block temp;
+        temp.block_no = sblock->log_start + i + 1;
+        device_read(&temp);
+        temp.block_no = header.block_no[i];
+        // ASSERT(temp.block_no < sblock->num_blocks);
+        device_write(&temp);
+    }
+    header.num_blocks = 0;
+    write_header();
 }
-
-// see `cache.h`.
+// initialize block cache.
 void init_bcache(const SuperBlock *_sblock, const BlockDevice *_device) {
     sblock = _sblock;
     device = _device;
 
     init_spinlock(&lock);
-    init_spinlock(&bitmaplock);
+    init_spinlock(&(log.log_lock));
     init_list_node(&head);
-    blocknum = 0;
-    header.num_blocks = 0;
-
-    init_spinlock(&log.lock);
+    cache_cnt = 0;
+    init_sem(&(log.log_sem), 0);
+    init_sem(&(log.log_commit_sem), 0);
+    log.max_size = MIN(sblock->num_log_blocks - 1, LOG_MAX_SIZE);
+    log.log_used = 0;
+    log.committing = false;
     log.outstanding = 0;
-    init_sem(&log.sem, 0);
-
-    read_header();
-    for (usize i = 0; i < header.num_blocks; ++i) {
-        blockcopy(sblock->log_start + i + 1, header.block_no[i]);
-    }
-    header.num_blocks = 0;
-    write_header();
+    recover_from_log();
 }
 
 // see `cache.h`.
 static void cache_begin_op(OpContext *ctx) {
-    acquire_spinlock(&log.lock);
-    ctx->rm = 0;
-    while (header.num_blocks + (log.outstanding + 1) * OP_MAX_NUM_BLOCKS > LOG_MAX_SIZE) {
-        cond_wait(&log.sem, &log.lock);
+    acquire_spinlock(&(log.log_lock));
+    while (true) {
+        if (log.committing) {
+            _lock_sem(&(log.log_sem));
+            release_spinlock(&(log.log_lock));
+            ASSERT(_wait_sem(&(log.log_sem), false));
+            acquire_spinlock(&(log.log_lock));
+        } else if (log.log_used + (int)header.num_blocks + OP_MAX_NUM_BLOCKS > log.max_size) {
+            _lock_sem(&(log.log_sem));
+            release_spinlock(&(log.log_lock));
+            ASSERT(_wait_sem(&(log.log_sem), false));
+            acquire_spinlock(&(log.log_lock));
+        } else {
+            log.outstanding++;
+            log.log_used += OP_MAX_NUM_BLOCKS;
+            ctx->rm = OP_MAX_NUM_BLOCKS;
+            break;
+        }
     }
-    log.outstanding++;
-    release_spinlock(&log.lock);
+    release_spinlock(&(log.log_lock));
 }
 
 // see `cache.h`.
 static void cache_sync(OpContext *ctx, Block *block) {
-    if (ctx == NULL) {
-        device_write(block);
-        return;
-    }
-    acquire_spinlock(&log.lock);
-    block->pinned = 1;
-    for (usize i = 0; i < header.num_blocks; ++i) {
-        if (block->block_no == header.block_no[i]) {
-            release_spinlock(&log.lock);
-            return;
-        }
-    }
-    ASSERT(ctx->rm < OP_MAX_NUM_BLOCKS);
-    ASSERT(header.num_blocks < LOG_MAX_SIZE);
-    ctx->rm++;
-    header.block_no[header.num_blocks++] = block->block_no;
-    release_spinlock(&log.lock);
-}
-
-// see `cache.h`.
-static void cache_end_op(OpContext *ctx) {
-    (void)ctx;
-    acquire_spinlock(&log.lock);
-    // ASSERT(log.outstanding > 0);
-    if (--log.outstanding == 0) {
-        for (usize i = 0; i < header.num_blocks; ++i) {
-            blockcopy(header.block_no[i], sblock->log_start + i + 1);
-        }
-        write_header();
-        for (usize i = 0; i < header.num_blocks; ++i) {
-            Block *b = cache_acquire(header.block_no[i]);
-            cache_sync(NULL, b);
-            b->pinned = false;
-            cache_release(b);
-        }
-        header.num_blocks = 0;
-        write_header();
-    }
-
-/**
- * if there are other threads waiting for the log, wake one such thread.
- * same effect as cond_signal(&log.cond).
- */
-    {
-        _lock_sem(&log.sem);
-        if (_query_sem(&log.sem) < 0) {
-            _post_sem(&log.sem);
-        }
-        _unlock_sem(&log.sem);
-    }
-    release_spinlock(&log.lock);
-}
-
-// see `cache.h`.
-static usize cache_alloc(OpContext *ctx) {
-    acquire_spinlock(&bitmaplock);
-    for (usize blockstart = 0; blockstart < sblock->num_blocks; blockstart += BIT_PER_BLOCK) {
-        Block *mp = cache_acquire(sblock->bitmap_start + blockstart / BIT_PER_BLOCK);
-        for (unsigned i = 0; i < BIT_PER_BLOCK && blockstart + i < sblock->num_blocks; ++i) {
-            u8 *t = &mp->data[i / 8];
-            int bit = 1 << (i & 7);
-            if ((*t & bit) == 0) {
-                *t |= bit;
-                cache_sync(ctx, mp);
-                cache_release(mp);
-                Block *ret = cache_acquire(blockstart + i);
-                memset(ret->data, 0, BLOCK_SIZE);
-                cache_sync(ctx, ret);
-                cache_release(ret);
-                release_spinlock(&bitmaplock);
-                return blockstart + i;
+    if (ctx) {
+        acquire_spinlock(&(log.log_lock));
+        usize i;
+        for (i = 0; i < header.num_blocks; ++i) {
+            if (header.block_no[i] == block->block_no) {
+                break;
             }
         }
-        cache_release(mp);
+        if (i == header.num_blocks) {
+            header.block_no[i] = block->block_no;
+            block->pinned = true;
+            if (ctx->rm > 0) {
+                ctx->rm--;
+                log.log_used--;
+                header.num_blocks++;
+            } else {
+                PANIC();
+            }
+        }
+        release_spinlock(&(log.log_lock));
+    } else {
+        // ASSERT(block->block_no < sblock->num_blocks);
+        device_write(block);
     }
-    release_spinlock(&bitmaplock);
-    PANIC();
+}
+
+void write_block_to_log() {
+    for (usize i = 0; i < header.num_blocks; ++i) {
+        Block *b_op = cache_acquire(header.block_no[i]);
+        // ASSERT(sblock->log_start + 1 + i < sblock->num_blocks);
+        device->write(sblock->log_start + 1 + i, b_op->data);
+        b_op->pinned = false;
+        cache_release(b_op);
+    }
+}
+void persist_from_log() {
+    u8 data[BLOCK_SIZE];
+    for (usize i = 0; i < header.num_blocks; ++i) {
+        device->read(sblock->log_start + 1 + i, data);
+        Block *b_op = cache_acquire(header.block_no[i]);
+        memmove(&(b_op->data), &data, BLOCK_SIZE);
+        // ASSERT(b_op->block_no < sblock->num_blocks);
+        device_write(b_op);
+        cache_release(b_op);
+    }
+}
+void checkpoint() {
+    if (header.num_blocks <= 0) {
+        return;
+    }
+    // Write blocks to log area
+    write_block_to_log();
+    write_header();
+    // actual write, Copy blocks to original locations
+    persist_from_log();
+    header.num_blocks = 0;
+    write_header();
+}
+// see `cache.h`.
+static void cache_end_op(OpContext *ctx) {
+    acquire_spinlock(&(log.log_lock));
+    log.outstanding--;
+    log.log_used -= ctx->rm;
+
+    if (log.outstanding == 0) {
+        log.committing = true;
+        release_spinlock(&(log.log_lock));
+        checkpoint();
+        log.committing = false;
+        post_all_sem(&(log.log_commit_sem));
+        post_all_sem(&(log.log_sem));
+    } else {
+        post_all_sem(&(log.log_sem));
+        _lock_sem(&(log.log_commit_sem));
+        release_spinlock(&(log.log_lock));
+        ASSERT(_wait_sem(&(log.log_commit_sem), false));
+    }
 }
 
 // see `cache.h`.
+// hint: you can use `cache_acquire`/`cache_sync` to read/write blocks.
+static usize cache_alloc(OpContext *ctx) {
+    Block *bitmap_block = NULL;
+    for (usize index = 0; index < sblock->num_blocks; index += BIT_PER_BLOCK) {
+        usize bitmap_block_no = index / BIT_PER_BLOCK + sblock->bitmap_start;
+        bitmap_block = cache_acquire(bitmap_block_no);
+        BitmapCell *bitmap = (BitmapCell *)(bitmap_block->data);
+        for (int i = 0; i < BIT_PER_BLOCK && index + i < sblock->num_blocks; ++i) {
+            bool if_valid = bitmap_get(bitmap, i);
+            if (if_valid == 0) {
+                bitmap_set(bitmap, i);
+                cache_sync(ctx, bitmap_block);
+                cache_release(bitmap_block);
+                usize alloc_block_no = index + i;
+                Block *alloc_block = cache_acquire(alloc_block_no);
+                memset(alloc_block->data, 0, BLOCK_SIZE);
+                cache_sync(ctx, alloc_block);
+                cache_release(alloc_block);
+                return alloc_block_no;
+            }
+        }
+        cache_release(bitmap_block);
+    }
+    PANIC();
+    return -1;
+}
+
+// see `cache.h`.
+// hint: you can use `cache_acquire`/`cache_sync` to read/write blocks.
 static void cache_free(OpContext *ctx, usize block_no) {
-    acquire_spinlock(&bitmaplock);
-    Block *mp = cache_acquire(sblock->bitmap_start + block_no / BIT_PER_BLOCK);
-    int idx = block_no % BIT_PER_BLOCK;
-    mp->data[idx / 8] &= ~(1 << (idx & 7));
-    cache_sync(ctx, mp);
-    cache_release(mp);
-    release_spinlock(&bitmaplock);
+    usize bitmap_block_no = block_no / BIT_PER_BLOCK + sblock->bitmap_start;
+    Block *bitmap_block = cache_acquire(bitmap_block_no);
+    BitmapCell *bitmap = (BitmapCell *)(bitmap_block->data);
+    usize index = block_no % BIT_PER_BLOCK;
+    bool if_valid = bitmap_get(bitmap, index);
+    if (if_valid == false) {
+        PANIC();
+    }
+    bitmap_clear(bitmap, index);
+    cache_sync(ctx, bitmap_block);
+    cache_release(bitmap_block);
 }
 
 BlockCache bcache = {

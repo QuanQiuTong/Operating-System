@@ -16,18 +16,6 @@
 #define USTACK_SIZE (16 * PAGE_SIZE)
 #define UPALIGN(x) (((x) + 0xf) & ~0xf)
 
-#define push(argv) ({                                      \
-    isize argc = 0;                                        \
-    if (argv) {                                            \
-        for (; /*argc < ARG_COUNT */ argv[argc]; argc++) { \
-            usize len = strlen(argv[argc]);                \
-            sp -= UPALIGN(len + 1);                        \
-            copyout(pgdir, sp, argv[argc], len + 1);       \
-        }                                                  \
-    }                                                      \
-    argc;                                                  \
-})
-
 int uvm_alloc(struct pgdir *pgdir, u64 base, u64 stksz, u64 oldsz, u64 newsz) {
     ASSERT(stksz % PAGE_SIZE == 0);
     base = base;
@@ -37,12 +25,6 @@ int uvm_alloc(struct pgdir *pgdir, u64 base, u64 stksz, u64 oldsz, u64 newsz) {
         *get_pte(pgdir, a, true) = K2P(p) | PTE_USER_DATA;
     }
     return newsz;
-}
-
-/* Data cache clean and invalidate by virtual address to point of coherency. */
-static ALWAYS_INLINE void arch_dccivac(void *p, int n) {
-    while (n--)
-        asm volatile("dc civac, %[x]" : : [x] "r"(p + n));
 }
 
 extern int fdalloc(struct file *f);
@@ -63,8 +45,7 @@ static ALWAYS_INLINE bool load_elf(struct pgdir *pgdir, const char *path, Elf64_
     if (inodes.read(ip, (u8 *)&elf, 0, sizeof(elf)) != sizeof(elf)) {
         goto bad;
     }
-    if (!(elf.e_ident[EI_MAG0] == ELFMAG0 && elf.e_ident[EI_MAG1] == ELFMAG1 &&
-          elf.e_ident[EI_MAG2] == ELFMAG2 && elf.e_ident[EI_MAG3] == ELFMAG3)) {
+    if (memcmp((char *)elf.e_ident, ELFMAG, SELFMAG) != 0) {
         goto bad;
     }
     if (elf.e_ident[EI_CLASS] != ELFCLASS64) {
@@ -97,18 +78,12 @@ static ALWAYS_INLINE bool load_elf(struct pgdir *pgdir, const char *path, Elf64_
         if ((sz = uvm_alloc(pgdir, base, stksz, sz, ph.p_vaddr + ph.p_memsz)) == 0) {
             PANIC();
         }
-        attach_pgdir(pgdir);
-        arch_tlbi_vmalle1is();
 
         static u8 buf[10 << 20];  // todo: no buffer, direct copy to user space
         if (inodes.read(ip, buf, ph.p_offset, ph.p_filesz) != ph.p_filesz) {
             PANIC();
         }
         copyout(pgdir, (void *)ph.p_vaddr, buf, ph.p_filesz);
-
-        arch_fence();
-        arch_dccivac((void *)ph.p_vaddr, ph.p_memsz);
-        arch_fence();
     }
 
     *elf_out = elf;
@@ -125,10 +100,14 @@ bad:
     return false;
 }
 
-#include <kernel/printk.h>
+SpinLock exec_lock = {0};
+
+static SleepLock load_lock;
+define_early_init(load_lock) {
+    init_sleeplock(&load_lock);
+}
 
 int execve(const char *path, char *const argv[], char *const envp[]) {
-    printk("\e[0;36m""execve %s\n""\e[0m", path);
 
     struct pgdir *const pgdir = kalloc(sizeof(struct pgdir));
     if (pgdir == NULL) {
@@ -137,10 +116,14 @@ int execve(const char *path, char *const argv[], char *const envp[]) {
     init_pgdir(pgdir);
 
     Elf64_Ehdr elf;
+
+    unalertable_acquire_sleeplock(&load_lock);
     if (!load_elf(pgdir, path, &elf)) {
-        printk("load_elf failed\n");
-        goto bad;
+        release_sleeplock(&load_lock);
+        free_pgdir(pgdir);
+        return -1;
     }
+    release_sleeplock(&load_lock);
 
     Proc *curproc = thisproc();
     struct pgdir oldpd = curproc->pgdir;
@@ -195,6 +178,7 @@ int execve(const char *path, char *const argv[], char *const envp[]) {
     copyout(pgdir, (void *)(USERTOP - stksz), 0, stksz - (USERTOP - (usize)sp));
     ASSERT((uint64_t)sp > USERTOP - stksz);
     curproc->pgdir = *pgdir;
+    init_list_node(&curproc->pgdir.section_head);
     curproc->ucontext->elr = elf.e_entry;
     curproc->ucontext->sp = (uint64_t)sp;
     attach_pgdir(&curproc->pgdir);
@@ -202,9 +186,4 @@ int execve(const char *path, char *const argv[], char *const envp[]) {
     free_pgdir(&oldpd);
 
     return 0;
-
-bad:
-
-    free_pgdir(pgdir);  // `pgdir` is definitely not NULL.
-    return -1;
 }

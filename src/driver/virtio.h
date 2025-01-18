@@ -4,7 +4,12 @@
 #include <driver/base.h>
 #include <common/buf.h>
 
-#define NQUEUE 8
+/**
+ * We need larger queue size for reading 2 or more files at the same time.
+ * 32 is enough for reading 2 files simultaneously, but larger is always better.
+ * At most 1024. This can be checked by reading `VIRTIO_REG_QUEUE_NUM_MAX`.
+ */
+#define NQUEUE 64 
 
 #define VIRTIO_REG_MAGICVALUE (VIRTIO0 + 0x00)
 #define VIRTIO_REG_VERSION (VIRTIO0 + 0x04)

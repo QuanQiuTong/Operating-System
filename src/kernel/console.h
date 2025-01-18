@@ -16,5 +16,6 @@ struct console {
 
 void console_init();
 void console_intr(char c);
+void console_arrow_intr(char c);
 isize console_write(Inode *ip, char *buf, isize n);
 isize console_read(Inode *ip, char *dst, isize n);

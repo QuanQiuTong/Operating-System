@@ -37,22 +37,7 @@ static void uartintr()
             break;
         case BRACKET:
             escape = NONE;
-            switch (c) {
-            case 'A':
-                printk(" * arrow up\n");
-                break;
-            case 'B':
-                printk(" * arrow down\n");
-                break;
-            case 'C':
-                printk(" * arrow right\n");
-                break;
-            case 'D':
-                printk(" * arrow left\n");
-                break;
-            default:
-                break;
-            }
+            console_arrow_intr(c);
             break;
         }
     }

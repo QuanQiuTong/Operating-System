@@ -39,8 +39,6 @@ isize console_write(Inode *ip, char *buf, isize n) {
     return n;
 }
 
-#define C(x) ((x) - '@')  // Control-x
-
 /**
  * console_read - read to the destination from the buffer
  * @ip: the pointer to the inode
@@ -79,17 +77,32 @@ isize console_read(Inode *ip, char *dst, isize n) {
     return m - n;
 }
 
+///@note Caller must hold the lock
+static ALWAYS_INLINE void clear_line() {
+    while (cons.edit_idx != cons.write_idx && cons.buf[(cons.edit_idx - 1) % IBUF_SIZE] != '\n') {
+        cons.edit_idx--;
+        putc(BACKSPACE);
+    }
+}
+
+#define LINES 32
+static char buf[LINES][IBUF_SIZE];  // LINES * IBUF_SIZE = PAGE_SIZE
+static int buf_idx = 0, cur_idx = 0;
+#include <common/string.h>
+
 void console_intr(char c) {
     acquire_spinlock(&cons.lock);
     switch (c) {
     case C('C'):
-        ASSERT(kill(thisproc()->pid) == 0);
-        break;
+        // int k = kill(thisproc()->pid);
+        // if (k < 0) {
+        //     printk("kill failed\n");
+        // }
+        putc('^'), putc('C'), putc('\n');
+
+        __attribute__((fallthrough));  // [[fallthrough]];
     case C('U'):
-        while (cons.edit_idx != cons.write_idx && cons.buf[(cons.edit_idx - 1) % IBUF_SIZE] != '\n') {
-            cons.edit_idx--;
-            putc(BACKSPACE);
-        }
+        clear_line();
         break;
 
     case C('H'):
@@ -107,12 +120,60 @@ void console_intr(char c) {
             cons.buf[cons.edit_idx++ % IBUF_SIZE] = c;
 
             if (c == '\n' || c == C('D') || cons.edit_idx == cons.read_idx + IBUF_SIZE) {
+                memcpy(buf[buf_idx], cons.buf + cons.read_idx % IBUF_SIZE, IBUF_SIZE);
+                buf_idx = (buf_idx + 1) % LINES;
+                cur_idx = buf_idx;
+
                 cons.write_idx = cons.edit_idx;
                 post_sem(&cons.sem);
             }
         }
         break;
     }
+    release_spinlock(&cons.lock);
+}
 
+void console_arrow_intr(char c) {
+    acquire_spinlock(&cons.lock);
+    switch (c) {
+    case 'A':  // up
+        int last = (cur_idx - 1 + LINES) % LINES;
+        if (last == buf_idx || buf[last][0] == '\0') {
+            break;
+        }
+        cur_idx = last;
+        clear_line();
+        for (int i = 0; i < IBUF_SIZE; i++) {
+            if (buf[cur_idx][i] == '\n' || buf[cur_idx][i] == '\0')
+                break;
+            release_spinlock(&cons.lock);
+            console_intr(buf[cur_idx][i]);
+            acquire_spinlock(&cons.lock);
+        }
+
+        break;
+    case 'B':  // down
+        if (cur_idx == buf_idx) {
+            break;
+        }
+        cur_idx = (cur_idx + 1) % LINES;
+        clear_line();
+        for (int i = 0; i < IBUF_SIZE; i++) {
+            if (buf[cur_idx][i] == '\n' || buf[cur_idx][i] == '\0')
+                break;
+            release_spinlock(&cons.lock);
+            console_intr(buf[cur_idx][i]);
+            acquire_spinlock(&cons.lock);
+        }
+
+        break;
+    case 'C':  // right
+        break;
+    case 'D':  // left
+        break;
+
+    default:
+        break;
+    }
     release_spinlock(&cons.lock);
 }

@@ -97,6 +97,7 @@ int main(int argc, char *argv[]) {
 
     if (optind >= argc) {
         fprintf(stderr, "mkdir: missing operand\n");
+        fprintf(stderr, "Try 'mkdir --help' for more information.\n");
         exit(1);
     }
 

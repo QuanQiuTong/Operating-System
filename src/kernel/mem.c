@@ -5,14 +5,24 @@
 #include <kernel/mem.h>
 
 #include <common/list.h>
-// #include <kernel/printk.h>
+#include <common/string.h>
+#include <kernel/printk.h>
+
+#define UPALIGN(x) (((u64)x + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1))
 
 RefCount kalloc_page_cnt;
 
 static SpinLock page_lock = {0};
 static ListNode list = {&list, &list};  // deleted pages.
 static char *mm_end;                    // lowest allocated page address
-static int pagenum = 0;                 // total number of pages. avoid re-calculating.
+
+u64 endp;
+static int pagenum;  // total number of pages. avoid re-calculating.
+static char *zero;
+
+// pagenum is definitely less than 262144 = (PHYSTOP - EXTMEM) / PAGE_SIZE
+
+_Atomic unsigned *refcnt;  // refcnt[0 ... pagenum - 1] is available.
 
 void kinit() {
     init_rc(&kalloc_page_cnt);
@@ -20,9 +30,21 @@ void kinit() {
     init_list_node(&list);
 
     extern char end[];
-    mm_end = (char *)((u64)(end - 1) & ~0xFFFull);
 
-    pagenum = PAGE_COUNT;
+    endp = UPALIGN(end);
+
+    refcnt = (typeof(refcnt))endp;
+
+    pagenum = (P2K(PHYSTOP) - endp) / (PAGE_SIZE + sizeof(refcnt[0]));
+
+    endp += UPALIGN(pagenum * sizeof(refcnt[0]));
+
+    mm_end = (char *)endp;
+
+    printk("end: %p, available: %llx, page_count: %d\n", end, (P2K(PHYSTOP) - endp), pagenum);
+
+    zero = kalloc_page();
+    memset(zero, 0, PAGE_SIZE);
 }
 
 u64 left_page_cnt() {
@@ -42,11 +64,16 @@ void *kalloc_page() {
         _detach_from_list(list.next);
     }
 
+    rc(ret) = 1;
+
     release_spinlock(&page_lock);
     return ret;
 }
 
 void kfree_page(void *p) {
+    if (--rc(p) > 0) {
+        return;
+    }
     decrement_rc(&kalloc_page_cnt);
 
     acquire_spinlock(&page_lock);
@@ -83,7 +110,7 @@ static SpinLock kalloc_lock[NCPU] = {0};
 #include <kernel/printk.h>
 
 void *kalloc(unsigned long long size) {
-    if(size > PAGE_SIZE / 2) {
+    if (size > PAGE_SIZE / 2) {
         printk("kalloc: size too large, consider using kalloc_pages or kalloc_large\n");
         PANIC();
         return NULL;
@@ -91,17 +118,8 @@ void *kalloc(unsigned long long size) {
     Node **fr = (size & 0x7) ? free4 : free8;
     size = (size + 3) & ~0x3;
 
-#ifdef DEBUG
-    bool l = try_acquire_spinlock(&kalloc_lock[cpuid()]);
-    if (!l) {
-        // Never reach here
-        printk("kalloc: failed to acquire spinlock\n");
-        arch_yield();
-        acquire_spinlock(&kalloc_lock[cpuid()]);
-    }
-#else
     acquire_spinlock(&kalloc_lock[cpuid()]);
-#endif
+
     Node *h = fr[cpuid()];
     for (; h; h = KADDR(h->next))
         if (h->free) {
@@ -137,7 +155,7 @@ void kfree(void *ptr) {
 }
 
 void *get_zero_page() {
-    return NULL;
+    return zero;
 }
 typedef struct {
     u64 npages;

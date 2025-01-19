@@ -292,6 +292,7 @@ static usize cache_alloc(OpContext *ctx) {
         }
         cache_release(bitmap_block);
     }
+    printk("[cache_alloc] No free block on disk\n");
     PANIC();
     return -1;
 }

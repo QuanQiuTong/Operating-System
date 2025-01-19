@@ -12,21 +12,36 @@
 #include <kernel/pt.h>
 #include <kernel/sched.h>
 
-void init_sections(ListNode *section_head) {
+#ifdef DEBUG
+#define printk(fmt, ...) printk(fmt, ##__VA_ARGS__)
+#else
+#define printk(fmt, ...)
+#endif
+
+__attribute__((unused)) void init_sections(ListNode *section_head) {
     printk("init_sections\n");
     struct section *sec = kalloc(sizeof(struct section));
-    _insert_into_list(section_head, &sec->stnode);
+    sec->flags = (0 | ST_HEAP);
     sec->begin = 0;
     sec->end = 0;
-    sec->flags = (0 | ST_HEAP);
+    _insert_into_list(section_head, &sec->stnode);
+    sec->fp = NULL;
 }
 
 #define for_list(node) for (ListNode *p = node.next; p != &node; p = p->next)
 
-void free_sections(struct pgdir *pd) {
+__attribute__((unused)) void free_sections(struct pgdir *pd) {
     printk("free_sections\n");
     for_list(pd->section_head) {
         struct section *sec = container_of(p, struct section, stnode);
+        for (u64 i = PAGE_BASE(sec->begin); i < sec->end; i += PAGE_SIZE) {
+            auto pte = get_pte(pd, i, false);
+            if (pte && (*pte & PTE_VALID))
+                kfree_page((void *)P2K(PTE_ADDRESS(*pte)));
+        }
+        if (sec->fp) {
+            file_close(sec->fp);
+        }
         if (sec->flags & ST_FILE) {
             kfree(sec);
         }
@@ -36,6 +51,8 @@ void free_sections(struct pgdir *pd) {
 #define REVERSED_PAGES 1024  // Reversed pages
 
 void *alloc_page_for_user() {
+    // no swap
+
     // while (left_page_cnt() <= REVERSED_PAGES) {
     //     // TODO
     //     return NULL;
@@ -50,24 +67,18 @@ void *alloc_page_for_user() {
  *
  * @return the previous heap_end.
  */
-u64 sbrk(i64 size) {
+__attribute__((unused)) u64 sbrk(i64 size) {
+    // 没有任何进程调用sbrk，除了测试
+    printk("\e[0;31m I found that no one is calling sbrk, except for the test\n\e[0m");
+
+    printk("\e[0;36m sbrk: %lld, pid=%d\n\e[0m", size, thisproc()->pid);
     ASSERT(size % PAGE_SIZE == 0);
 
     struct pgdir *pd = &thisproc()->pgdir;
     struct section *sec = container_of(pd->section_head.next, struct section, stnode);
     u64 old_end = sec->end;
 
-    if (size > 0) {  // todo: lazy allocation
-        for (i64 i = 0; i < size; i += PAGE_SIZE) {
-            void *new_page = alloc_page_for_user();
-            if (!new_page) {
-                return -1;
-            }
-            *get_pte(pd, sec->end + i, true) = K2P(new_page) | PTE_USER_DATA;
-        }
-    }
-
-    sec->end += size;
+    sec->end += size;  // lazy allocation
     if (size < 0) {
         for (i64 i = 0; i < -size; i += PAGE_SIZE) {
             PTEntry *pte = get_pte(pd, sec->end + i, false);
@@ -77,76 +88,13 @@ u64 sbrk(i64 size) {
             }
         }
     }
-    attach_pgdir(pd);
     arch_tlbi_vmalle1is();
     return old_end;
 }
 
-/* // caller must have the pd->lock
-static void swapout(struct pgdir *pd, struct section *st) {
-    st->flags |= ST_SWAP;
-    for (u64 i = st->begin; i < st->end; i += PAGE_SIZE) {
-        auto pte = get_pte(pd, i, false);
-        if (pte && (*pte))
-            *pte &= (~PTE_VALID);
-    }
-    u64 begin = st->begin;
-    u64 end = st->end;
-    attach_pgdir(pd);
-    arch_tlbi_vmalle1is();
-    // unalertable_wait_sem(&st->sleeplock);
-    _release_spinlock(&pd->lock);
-    if (!(st->flags & ST_FILE)) {
-        for (u64 i = begin; i < end; i += PAGE_SIZE) {
-            auto pte = get_pte(pd, i, false);
-            if (pte && (!(*pte & PTE_VALID))) {
-                *pte = write_page_to_disk((void *)P2K(CLEAN(*pte)));
-            }
-        }
-    }
-    attach_pgdir(pd);
-    arch_tlbi_vmalle1is();
-    sbrk(-(end - begin) / PAGE_SIZE);
-    st->end = end;
-    // post_sem(&st->sleeplock);
-} */
-
-#define SWAP_START 800
-#define SWAP_END 1000
-static bool inuse[SWAP_END - SWAP_START];
-void release_8_blocks(u32 bno) {
-    bno -= SWAP_START;
-    for (int i = 0; i < 8; i++) {
-        inuse[bno + i] = 0;
-    }
-}
-void read_page_from_disk(void *ka, u32 bno) {
-    for (int i = 0; i < 8; i++)
-        block_device.read(bno + i, (u8 *)ka + i * 512);
-}
-// Free 8 continuous disk blocks
-static void swapin(struct pgdir *pd, struct section *st) {
-    ASSERT(st->flags & ST_SWAP);
-    // unalertable_wait_sem(&st->sleeplock);
-    u64 begin = st->begin, end = st->end;
-    for (u64 i = begin; i < end; i += PAGE_SIZE) {
-        auto pte = get_pte(pd, i, false);
-        if (pte && (*pte)) {
-            u32 bno = (*pte);
-            void *newpage = alloc_page_for_user();
-            read_page_from_disk(newpage, (u32)bno);
-            *pte = K2P(newpage) | PTE_USER_DATA;
-            release_8_blocks(bno);
-        }
-    }
-    attach_pgdir(pd);
-    arch_tlbi_vmalle1is();
-    st->flags &= ~ST_SWAP;
-    // post_sem(&st->sleeplock);
-}
-
 #define USERTOP (1 + ~KSPACE_MASK)  // 0x0001000000000000
-#define USTACK_SIZE (16 * PAGE_SIZE)
+#define STACK_PAGE 32               // 128KB stack
+#define USTACK_SIZE (STACK_PAGE * PAGE_SIZE)
 #define USER_STACK_TOP (USERTOP - USTACK_SIZE)
 #define MIN_STACK_SIZE (4 * PAGE_SIZE)
 
@@ -175,83 +123,65 @@ int pgfault_handler(u64 iss) {
 
     struct section *sec = NULL;
     for_list(pd->section_head) {
-        if (p == p->next)
-            break;
         sec = container_of(p, struct section, stnode);
-        printk("sec<1>: %llx %llx %x\n", sec->begin, sec->end, sec->flags);
-
-        if (in_section(sec, addr)) {
+        if (in_section(sec, addr))
             break;
-        }
     }
 
     if (!sec || !in_section(sec, addr)) {
-        // 检查是否为栈访问
-        if (addr >= (USER_STACK_TOP - USTACK_SIZE) && addr < USER_STACK_TOP) {
-            // 合法的栈访问，按需分配页面
-            PTEntry *pte = get_pte(pd, addr, true);
-            if (!pte) {
-                goto bad;
-            }
-            void *new_page = alloc_page_for_user();
-            if (!new_page) {
-                goto bad;
-            }
-            *pte = K2P(new_page) | PTE_USER_DATA;
-            attach_pgdir(pd);
-            arch_tlbi_vmalle1is();
-            return iss;
-        }
+        // 栈已经分配了。有可能是访问了未分配的部分（“爆栈”）
+
+        // if (addr >= (USER_STACK_TOP - USTACK_SIZE) && addr < USER_STACK_TOP) {
+        //     // 合法的栈访问，按需分配页面
+        //     PTEntry *pte = get_pte(pd, addr, true);
+        //     void *new_page = alloc_page_for_user();
+        //     *pte = K2P(new_page) | PTE_USER_DATA;
+        //     attach_pgdir(pd);
+        //     arch_tlbi_vmalle1is();
+        //     return iss;
+        // }
 
         printk("Invalid memory access at %llx\n", addr);
         goto bad;
     }
 
+    printk("  successfuly handled on sec: %llx %llx %x %x\n", sec->begin, sec->end, sec->flags, sec->mmap_flags);
+
+    if (sec->mmap_flags) {
+        void *new_page = kalloc_page();
+        vmmap(pd, addr, new_page, PTE_USER_DATA);
+        arch_tlbi_vmalle1is();
+        struct file *f = sec->fp;
+        if (!f->readable || f->type != FD_INODE) {
+            printk("Invalid mmap file access\n");
+            goto bad;
+        }
+        u64 offset = sec->offset + (addr - sec->begin);
+        inodes.lock(f->ip);
+        int n = inodes.read(f->ip, new_page, offset, PAGE_SIZE);
+        inodes.unlock(f->ip);
+        // 如果读取的内容不足一页，将剩余部分清零
+        if (n < PAGE_SIZE) {
+            memset(new_page + n, 0, PAGE_SIZE - n);
+        }
+        return iss;
+    }
+
     PTEntry *pte = get_pte(pd, addr, true);
-    if (!pte) {
-        printk("Failed to get PTE for address %llx\n", addr);
-        goto bad;
-    }
-
-    if (*pte == 0) {
-        // Lazy allocation
+    if (*pte == 0) {  // Lazy allocation
         printk(" - Lazy allocation\n");
+        vmmap(pd, addr, alloc_page_for_user(), PTE_USER_DATA);
+    } else if (*pte & PTE_RO) {  // Copy on Write
+        printk(" - Copy on Write\n");
         void *new_page = alloc_page_for_user();
-        if (!new_page) {
-            printk("Failed to allocate page\n");
-            goto bad;
-        }
-        *pte = K2P(new_page) | PTE_USER_DATA;
-
-        if (sec->flags & ST_FILE) {
-            struct file *f = sec->fp;
-            u64 offset = sec->offset + (addr - sec->begin);
-            inodes.lock(f->ip);
-            int n = inodes.read(f->ip, new_page, offset, PAGE_SIZE);
-            inodes.unlock(f->ip);
-            if (n < 0) {
-                goto bad;
-            }
-            // 如果读取的内容不足一页，将剩余部分清零
-            if (n < PAGE_SIZE) {
-                memset(new_page + n, 0, PAGE_SIZE - n);
-            }
-        }
-
-    } else if (*pte & PTE_RO) {
-        // Copy on Write
-        void *new_page = alloc_page_for_user();
-        if (!new_page) {
-            printk("Failed to allocate page\n");
-            goto bad;
-        }
-        memmove(new_page, (void *)P2K(PTE_ADDRESS(*pte)), PAGE_SIZE);
-        *pte = K2P(new_page) | PTE_USER_DATA;
+        memcpy(new_page, (void *)P2K(PTE_ADDRESS(*pte)), PAGE_SIZE);
+        vmmap(pd, addr, new_page, PTE_USER_DATA);
     } else if (!(*pte & PTE_VALID) && (sec->flags & ST_SWAP)) {
-        swapin(pd, sec);
+        printk("Page fault on swapped out page\n");
+        PANIC();
     }
 
-    attach_pgdir(pd);
+    // attach_pgdir(pd);
     arch_tlbi_vmalle1is();
     return iss;
 
@@ -261,32 +191,45 @@ bad:
     return iss;
 }
 
-void copy_sections(ListNode *from_head, ListNode *to_head) {
-    printk("copy_sections %p\n", from_head);
+/* Sharing types (must choose one and only one of these).  */
+#define MAP_SHARED 0x01          /* Share changes.  */
+#define MAP_PRIVATE 0x02         /* Changes are private.  */
+#define MAP_SHARED_VALIDATE 0x03 /* Share changes and validate \
+                                    extension flags.  */
+#define MAP_TYPE 0x0f            /* Mask for type of mapping.  */
 
+void copy_sections(ListNode *from_head, ListNode *to_head) {
     for_list((*from_head)) {
-        if (p == p->next || p->next == from_head->next)
-            break;
         struct section *from_sec = container_of(p, struct section, stnode);
-        printk("sec<2>: %llx %llx %x\n", from_sec->begin, from_sec->end, from_sec->flags);
         struct section *to_sec = kalloc(sizeof(struct section));
 
-        memmove(to_sec, from_sec, sizeof(struct section));
+        memcpy(to_sec, from_sec, sizeof(struct section));
+
         _insert_into_list(to_head, &to_sec->stnode);
 
-        if (from_sec->fp != NULL) {
-            printk(" - file_dup, from_sec->flags=%x\n", from_sec->flags);
-            // 对于MAP_PRIVATE，创建新的文件描述符
-#define MAP_PRIVATE 0x02 /* Changes are private.  */
+        if (from_sec->fp) {
+            to_sec->fp = file_dup(from_sec->fp);
+        }
 
-            if (from_sec->mmap_flags & MAP_PRIVATE) {
-                to_sec->fp = file_dup(from_sec->fp);
+        // 把父进程的页面映射复制到子进程
+        struct pgdir *from_pd = container_of(from_head, struct pgdir, section_head);
+        struct pgdir *to_pd = container_of(to_head, struct pgdir, section_head);
+
+        for (u64 va = PAGE_BASE(from_sec->begin); va < from_sec->end; va += PAGE_SIZE) {
+            PTEntry *pte_from = get_pte(from_pd, va, false);
+            if (!pte_from || !(*pte_from & PTE_VALID))
+                continue;
+            // 如果是 MAP_SHARED，可以直接共用物理页 + 引用计数
+            if (from_sec->mmap_flags & MAP_SHARED) {
+                PTEntry *pte_to = get_pte(to_pd, va, true);
+                *pte_to = *pte_from;  // 直接共享同一个物理页
             } else {
-                // MAP_SHARED共享同一个文件描述符
-                to_sec->fp = from_sec->fp;
+                // MAP_PRIVATE 或其它情况：分配新页并复制
+                void *new_page = kalloc_page();
+                memcpy(new_page, (void *)P2K(PTE_ADDRESS(*pte_from)), PAGE_SIZE);
+                PTEntry *pte_to = get_pte(to_pd, va, true);
+                *pte_to = K2P(new_page) | (PTE_FLAGS(*pte_from) & ~PTE_RO);
             }
         }
     }
-
-    printk("copy_sections done\n");
 }

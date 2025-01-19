@@ -26,6 +26,12 @@
 #include <kernel/sched.h>
 #include "syscall.h"
 
+#ifdef DEBUG
+#define printk(fmt, ...) printk(fmt, ##__VA_ARGS__)
+#else
+#define printk(fmt, ...)
+#endif
+
 struct iovec {
     void *iov_base; /* Starting address. */
     usize iov_len;  /* Number of bytes to transfer. */
@@ -71,26 +77,15 @@ define_syscall(mmap, void *addr, size_t length, int prot, int flags, int fd, off
         "sys_mmap: addr %p, length %lld, prot %d, flags %d, fd %d, offset %lld\n"
         "\e[0m",
         addr, (long long)length, prot, flags, fd, (long long)offset);
-    if (addr != NULL) {
-        printk("sys_mmap: addr unimplemented\n");
-        return -1;
-    }
+
     if (length <= 0 || (prot & PROT_EXEC) || (flags & MAP_ANONYMOUS)) {
         printk("sys_mmap: length, prot, flags unimplemented\n");
-        return -1;
-    }
-    if (fd < 0 || fd >= NOFILE) {
-        printk("sys_mmap: fd unimplemented\n");
-        return -1;
-    }
-    if (offset % PAGE_SIZE != 0) {
-        printk("sys_mmap: offset unimplemented\n");
         return -1;
     }
 
     struct file *f = fd2file(fd);
     if (!f) {
-        printk("sys_mmap: fd2file failed\n");
+        printk("sys_mmap: invalid file descriptor\n");
         return -1;
     }
 
@@ -127,9 +122,13 @@ define_syscall(mmap, void *addr, size_t length, int prot, int flags, int fd, off
     sec->mmap_flags = flags;
 
     static usize next_addr = 0x100000;  // 从 1MB 开始分配
-    sec->begin = next_addr;
-    sec->end = next_addr + size;
-    next_addr += size;
+    if (addr == NULL) {
+        sec->begin = next_addr;
+        next_addr += size;
+    }else{
+        sec->begin = (usize)addr;
+    }
+    sec->end = sec->begin + size;
 
     sec->fp = f;
     file_dup(f);
@@ -140,7 +139,7 @@ define_syscall(mmap, void *addr, size_t length, int prot, int flags, int fd, off
     inodes.unlock(ip);
     bcache.end_op(&ctx);
 
-    printk("sys_mmap: return %p, sec %p\n", (void *)sec->begin, sec);
+    printk("    mmap: return %p\n", (void *)sec->begin);
     return sec->begin;
 }
 
@@ -152,7 +151,7 @@ define_syscall(munmap, u64 addr, size_t length) {
     LOG("addr %llx, length %llx\n", addr, (long long)length);
 
     if (length == 0)
-        return -1;
+        return 0;
 
     u64 aligned_addr = round_down(addr, PAGE_SIZE);
     u64 aligned_len = round_up(length, PAGE_SIZE);

@@ -21,6 +21,10 @@ void kfree(void *);
 
 WARN_RESULT void *get_zero_page();
 
+extern u64 endp;
+extern _Atomic unsigned *refcnt;  // this ptr is only set once on kinit.
+#define rc(page) refcnt[((u64)(page) - endp) / PAGE_SIZE]
+
 /**
  * Allocate large memory, supporting more than one page.
  */

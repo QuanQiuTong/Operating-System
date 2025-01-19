@@ -13,12 +13,12 @@
 #include <kernel/syscall.h>
 
 #define USERTOP (1 + ~KSPACE_MASK)  // 0x0001000000000000
-#define USTACK_SIZE (16 * PAGE_SIZE)
+#define STACK_PAGE 32               // 128KB stack
 #define UPALIGN(x) (((x) + 0xf) & ~0xf)
 
 extern int fdalloc(struct file *f);
 
-static ALWAYS_INLINE bool load_elf(struct pgdir *pgdir, const char *path, Elf64_Ehdr *elf_out) {
+static ALWAYS_INLINE bool load_elf(struct pgdir *pd, const char *path, Elf64_Ehdr *elf_out) {
     // 打开和检查ELF文件
     OpContext ctx;
     bcache.begin_op(&ctx);
@@ -41,8 +41,6 @@ static ALWAYS_INLINE bool load_elf(struct pgdir *pgdir, const char *path, Elf64_
         goto bad;
     }
 
-    u64 sz = 0;
-    bool first = true;
     for (usize i = 0, off = elf.e_phoff; i < elf.e_phnum; i++, off += sizeof(Elf64_Phdr)) {
         Elf64_Phdr ph;
         if ((inodes.read(ip, (u8 *)&ph, off, sizeof(ph))) != sizeof(ph)) {
@@ -57,27 +55,58 @@ static ALWAYS_INLINE bool load_elf(struct pgdir *pgdir, const char *path, Elf64_
         if (ph.p_vaddr + ph.p_memsz < ph.p_vaddr) {
             PANIC();
         }
-        if (first) {
-            first = false;
-            sz = ph.p_vaddr;
+
+        int sec_flag = 0;
+        u64 end;
+        if (ph.p_flags == (PF_R | PF_X)) {
+            sec_flag = ST_TEXT;
+            end = ph.p_vaddr + ph.p_filesz;
+        } else if (ph.p_flags == (PF_R | PF_W)) {
+            sec_flag = ST_FILE;
+            end = ph.p_vaddr + ph.p_memsz;
+        } else {
+            goto bad;
         }
 
-        // uvm alloc
-        for (u64 va = round_up(sz, PAGE_SIZE); va < ph.p_vaddr + ph.p_memsz; va += PAGE_SIZE) {
-            void *page = kalloc_page();
-            // memset(p, 0, PAGE_SIZE);
-            *get_pte(pgdir, va, true) = K2P(page) | PTE_USER_DATA;
-        }
-        sz = ph.p_vaddr + ph.p_memsz;
+        // insert into new section
+        struct section *st = kalloc(sizeof(struct section));
+        st->flags = sec_flag;
+        st->mmap_flags = 0;
+        st->begin = ph.p_vaddr;
+        st->end = end;
+        _insert_into_list(&pd->section_head, &st->stnode);
+        st->fp = NULL;
 
-        for (usize va = ph.p_vaddr, len = ph.p_filesz; len;) {
-            u64 *pte = get_pte(pgdir, va, true);
-            ASSERT(*pte & PTE_VALID);
-            void *page = (void *)P2K(PTE_ADDRESS(*pte));
-            usize pgoff = va % PAGE_SIZE;
-            usize n = MIN(PAGE_SIZE - pgoff, len);
-            inodes.read(ip, page + pgoff, ph.p_offset + (va - ph.p_vaddr), n);
-            len -= n, va += n;
+        u64 va = ph.p_vaddr, ph_off = ph.p_offset;
+        while (va < ph.p_vaddr + ph.p_filesz) {
+            u64 va0 = PAGE_BASE(va);
+            u64 sz = MIN(PAGE_SIZE - (va - va0), ph.p_vaddr + ph.p_filesz - va);
+
+            void *p = kalloc_page();
+            memset(p, 0, PAGE_SIZE);
+            u64 pte_flag = PTE_USER_DATA;
+            if (sec_flag == ST_TEXT)
+                pte_flag |= PTE_RO;
+            vmmap(pd, va0, p, pte_flag);
+
+            if (inodes.read(ip, (u8 *)p + va - va0, ph_off, sz) != sz) {
+                goto bad;
+            }
+
+            va += sz;
+            ph_off += sz;
+        }
+
+        if (va != PAGE_BASE(va))
+            va = PAGE_BASE(va) + PAGE_SIZE;
+
+        if (sec_flag == ST_FILE && ph.p_memsz > va - ph.p_vaddr) {
+            while (va < ph.p_vaddr + ph.p_memsz) {
+                u64 va0 = PAGE_BASE(va);
+                u64 sz = MIN(PAGE_SIZE - (va - va0), ph.p_vaddr + ph.p_memsz - va);
+                vmmap(pd, va0, get_zero_page(), PTE_USER_DATA | PTE_RO);
+                va += sz;
+            }
         }
     }
 
@@ -116,11 +145,20 @@ int execve(const char *path, char *const argv[], char *const envp[]) {
     }
     release_sleeplock(&load_lock);
 
-    Proc *curproc = thisproc();
-    struct pgdir oldpd = curproc->pgdir;
-    attach_pgdir(&oldpd);
-    arch_tlbi_vmalle1is();
-    u64 sp = (USERTOP - USTACK_SIZE);
+    u64 sp = USERTOP;
+
+    for (int i = 1; i <= STACK_PAGE; ++i) {
+        void *p = kalloc_page();
+        memset(p, 0, PAGE_SIZE);
+        vmmap(pgdir, sp - i * PAGE_SIZE, p, PTE_USER_DATA);
+    }
+    struct section *sec = kalloc(sizeof(struct section));
+    memset(sec, 0, sizeof(struct section));
+    sec->flags = ST_FILE;
+    sec->begin = sp - STACK_PAGE * PAGE_SIZE;
+    sec->end = sp;
+    _insert_into_list(&pgdir->section_head, &sec->stnode);
+
     {
         u64 argc = 0, envc = 0;
         if (envp)
@@ -164,11 +202,11 @@ int execve(const char *path, char *const argv[], char *const envp[]) {
         copyout(pgdir, (void *)sp, &argc, sizeof(argc));
     }
 
-    u64 stksz = (USERTOP - (usize)sp + 10 * PAGE_SIZE - 1) / (10 * PAGE_SIZE) * (10 * PAGE_SIZE);
-    copyout(pgdir, (void *)(USERTOP - stksz), 0, stksz - (USERTOP - (usize)sp));
-    ASSERT((uint64_t)sp > USERTOP - stksz);
+    Proc *curproc = thisproc();
+    struct pgdir oldpd = curproc->pgdir;
     curproc->pgdir = *pgdir;
-    init_list_node(&curproc->pgdir.section_head);
+    _insert_into_list(&pgdir->section_head, &curproc->pgdir.section_head);
+    _detach_from_list(&pgdir->section_head);
     curproc->ucontext->elr = elf.e_entry;
     curproc->ucontext->sp = (uint64_t)sp;
     attach_pgdir(&curproc->pgdir);

@@ -74,9 +74,7 @@ void attach_pgdir(struct pgdir *pgdir) {
 void vmmap(struct pgdir *pd, u64 va, void *ka, u64 flags) {
     auto pte = get_pte(pd, va, true);
     *pte = K2P(ka) | flags;
-    /* some ref count... */
-    attach_pgdir(pd);
-    arch_tlbi_vmalle1is();
+    rc(ka)++;
 }
 
 /*
@@ -103,7 +101,7 @@ int copyout(struct pgdir *pd, void *va, void *p, usize len) {
         usize pgoff = (usize)va % PAGE_SIZE;
         n = MIN(PAGE_SIZE - pgoff, len);
         if (p) {
-            memmove(page + pgoff, p, n);
+            memcpy(page + pgoff, p, n);
             p += n;
         } else
             memset(page + pgoff, 0, n);

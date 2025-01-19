@@ -171,6 +171,8 @@ NO_RETURN void exit(int code) {
     bcache.end_op(&ctx);
     this->cwd = NULL;
 
+    free_sections(&this->pgdir);  // must free sections before free_pgdir
+
     acquire_spinlock(&plock);
     post_sem(&this->parent->childexit);
 
@@ -223,7 +225,7 @@ int kill(int pid) {
     return -1;
 }
 
-static ALWAYS_INLINE void ptcopy(struct pgdir *dst, PTEntriesPtr src) {
+static __attribute__((unused)) void ptcopy(struct pgdir *dst, PTEntriesPtr src) {
     for (int i = 0; i < N_PTE_PER_TABLE; i++)
         if (src[i] & PTE_VALID) {
             ASSERT(src[i] & PTE_TABLE);
@@ -278,7 +280,20 @@ int fork() {
     Proc *cp = thisproc();
 
     acquire_spinlock(&cp->pgdir.lock);
-    ptcopy(&np->pgdir, cp->pgdir.pt); // (&cp->pgdir)->pt
+    // ptcopy(&np->pgdir, cp->pgdir.pt); // (&cp->pgdir)->pt
+
+    PTEntriesPtr old_pte;
+    for_list(cp->pgdir.section_head) {
+        struct section *st = container_of(p, struct section, stnode);
+        // Copy on Write
+        for (u64 va = PAGE_BASE(st->begin); va < st->end; va += PAGE_SIZE) {
+            old_pte = get_pte(&(cp->pgdir), va, false);
+            if ((old_pte == NULL) || !(*old_pte & PTE_VALID)) {
+                continue;
+            }
+            vmmap(&(np->pgdir), va, (void *)P2K(PTE_ADDRESS(*old_pte)), PTE_FLAGS(*old_pte) | PTE_RO);
+        }
+    }
     copy_sections(&cp->pgdir.section_head, &np->pgdir.section_head);
     release_spinlock(&cp->pgdir.lock);
 

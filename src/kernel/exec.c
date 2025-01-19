@@ -16,17 +16,6 @@
 #define USTACK_SIZE (16 * PAGE_SIZE)
 #define UPALIGN(x) (((x) + 0xf) & ~0xf)
 
-int uvm_alloc(struct pgdir *pgdir, u64 base, u64 stksz, u64 oldsz, u64 newsz) {
-    ASSERT(stksz % PAGE_SIZE == 0);
-    base = base;
-    for (u64 a = (oldsz + PAGE_SIZE - 1) / PAGE_SIZE * PAGE_SIZE; a < newsz; a += PAGE_SIZE) {
-        void *p = kalloc_page();
-        ASSERT(p != NULL);
-        *get_pte(pgdir, a, true) = K2P(p) | PTE_USER_DATA;
-    }
-    return newsz;
-}
-
 extern int fdalloc(struct file *f);
 
 static ALWAYS_INLINE bool load_elf(struct pgdir *pgdir, const char *path, Elf64_Ehdr *elf_out) {
@@ -52,12 +41,12 @@ static ALWAYS_INLINE bool load_elf(struct pgdir *pgdir, const char *path, Elf64_
         goto bad;
     }
 
-    Elf64_Phdr ph;
-    u64 sz = 0, base = 0, stksz = 0;
+    u64 sz = 0;
     bool first = true;
-    for (usize i = 0, off = elf.e_phoff; i < elf.e_phnum; i++, off += sizeof(ph)) {
+    for (usize i = 0, off = elf.e_phoff; i < elf.e_phnum; i++, off += sizeof(Elf64_Phdr)) {
+        Elf64_Phdr ph;
         if ((inodes.read(ip, (u8 *)&ph, off, sizeof(ph))) != sizeof(ph)) {
-            PANIC();
+            goto bad;
         }
         if (ph.p_type != PT_LOAD) {
             continue;
@@ -70,20 +59,26 @@ static ALWAYS_INLINE bool load_elf(struct pgdir *pgdir, const char *path, Elf64_
         }
         if (first) {
             first = false;
-            sz = base = ph.p_vaddr;
-            if (base % PAGE_SIZE != 0) {
-                PANIC();
-            }
-        }
-        if ((sz = uvm_alloc(pgdir, base, stksz, sz, ph.p_vaddr + ph.p_memsz)) == 0) {
-            PANIC();
+            sz = ph.p_vaddr;
         }
 
-        static u8 buf[10 << 20];  // todo: no buffer, direct copy to user space
-        if (inodes.read(ip, buf, ph.p_offset, ph.p_filesz) != ph.p_filesz) {
-            PANIC();
+        // uvm alloc
+        for (u64 va = round_up(sz, PAGE_SIZE); va < ph.p_vaddr + ph.p_memsz; va += PAGE_SIZE) {
+            void *page = kalloc_page();
+            // memset(p, 0, PAGE_SIZE);
+            *get_pte(pgdir, va, true) = K2P(page) | PTE_USER_DATA;
         }
-        copyout(pgdir, (void *)ph.p_vaddr, buf, ph.p_filesz);
+        sz = ph.p_vaddr + ph.p_memsz;
+
+        for (usize va = ph.p_vaddr, len = ph.p_filesz; len;) {
+            u64 *pte = get_pte(pgdir, va, true);
+            ASSERT(*pte & PTE_VALID);
+            void *page = (void *)P2K(PTE_ADDRESS(*pte));
+            usize pgoff = va % PAGE_SIZE;
+            usize n = MIN(PAGE_SIZE - pgoff, len);
+            inodes.read(ip, page + pgoff, ph.p_offset + (va - ph.p_vaddr), n);
+            len -= n, va += n;
+        }
     }
 
     *elf_out = elf;
@@ -102,13 +97,9 @@ bad:
 
 SpinLock exec_lock = {0};
 
-static SleepLock load_lock;
-define_early_init(load_lock) {
-    init_sleeplock(&load_lock);
-}
+static SleepLock load_lock = {.lock = {0}, .val = 1, .sleeplist = {&load_lock.sleeplist, &load_lock.sleeplist}};
 
 int execve(const char *path, char *const argv[], char *const envp[]) {
-
     struct pgdir *const pgdir = kalloc(sizeof(struct pgdir));
     if (pgdir == NULL) {
         return -1;
@@ -173,7 +164,6 @@ int execve(const char *path, char *const argv[], char *const envp[]) {
         copyout(pgdir, (void *)sp, &argc, sizeof(argc));
     }
 
-    // sp = newsp;
     u64 stksz = (USERTOP - (usize)sp + 10 * PAGE_SIZE - 1) / (10 * PAGE_SIZE) * (10 * PAGE_SIZE);
     copyout(pgdir, (void *)(USERTOP - stksz), 0, stksz - (USERTOP - (usize)sp));
     ASSERT((uint64_t)sp > USERTOP - stksz);

@@ -125,7 +125,7 @@ define_syscall(mmap, void *addr, size_t length, int prot, int flags, int fd, off
     if (addr == NULL) {
         sec->begin = next_addr;
         next_addr += size;
-    }else{
+    } else {
         sec->begin = (usize)addr;
     }
     sec->end = sec->begin + size;
@@ -210,16 +210,68 @@ define_syscall(dup, int fd) {
     return fd;
 }
 
+define_syscall(dup3, int oldfd, int newfd, int flags) {
+    if (oldfd == newfd)
+        return -1;
+
+    struct file *f = fd2file(oldfd);
+    if (!f)
+        return -1;
+
+    if (thisproc()->oftable.openfile[newfd]) {
+        file_close(thisproc()->oftable.openfile[newfd]);
+        thisproc()->oftable.openfile[newfd] = NULL;
+    }
+
+    thisproc()->oftable.openfile[newfd] = f;
+    file_dup(f);
+
+    // oftable 结构没实现 fd 标志
+    if (flags & O_CLOEXEC) {
+        // thisproc()->oftable.fd_flags[newfd] |= FD_CLOEXEC;
+    } else {
+        // thisproc()->oftable.fd_flags[newfd] &= ~FD_CLOEXEC;
+    }
+
+    return newfd;
+}
+
+define_syscall(fcntl, int fd, int cmd, int arg) {
+    struct file *f = fd2file(fd);
+    if (!f)
+        return -1;
+
+    switch (cmd) {
+    case F_DUPFD:
+        file_dup(f);
+        return fdalloc(f);
+    case F_GETFD:
+        return 0;
+    case F_SETFD:
+        return 0;
+    case F_GETFL:
+        return 0;
+    case F_SETFL:
+        return 0;
+    case F_GETOWN:
+        return 0;
+    case F_SETOWN:
+        return 0;
+    default:
+        return -1;
+    }
+}
+
 define_syscall(read, int fd, char *buffer, int size) {
     struct file *f = fd2file(fd);
-    if (!f || size <= 0 || !user_writeable(buffer, size))
+    if (!f || !f->readable || size <= 0 || !user_writeable(buffer, size))
         return -1;
     return file_read(f, buffer, size);
 }
 
 define_syscall(write, int fd, char *buffer, int size) {
     struct file *f = fd2file(fd);
-    if (!f || size <= 0 || !user_readable(buffer, size))
+    if (!f || !f->writable || size <= 0 || !user_readable(buffer, size))
         return -1;
     return file_write(f, buffer, size);
 }
@@ -460,9 +512,17 @@ define_syscall(openat, int dirfd, const char *path, int omode) {
 
     f->type = FD_INODE;
     f->ip = ip;
-    f->off = 0;
+    f->off = (omode & O_APPEND) ? ip->entry.num_bytes : 0;
     f->readable = !(omode & O_WRONLY);
     f->writable = (omode & O_WRONLY) || (omode & O_RDWR);
+
+    if (omode & O_TRUNC && f->writable) {
+        inodes.lock(ip);
+        ip->entry.num_bytes = 0;
+        inodes.sync(&ctx, ip, true);
+        inodes.unlock(ip);
+    }
+
     return fd;
 }
 

@@ -14,6 +14,8 @@
 #define LIST 4
 #define BACK 5
 
+#define REDIR_HEREDOC 0x1000 // avoid conflict with those in fcntl.h
+
 #define MAXARGS 10
 
 struct cmd {
@@ -101,12 +103,83 @@ void runcmd(struct cmd *cmd)
 
     case REDIR:
         rcmd = (struct redircmd *)cmd;
-        close(rcmd->fd);
-        if (open(rcmd->file, rcmd->mode) < 0) {
-            fprintf(stderr, "open %s failed\n", rcmd->file);
-            exit(1);
+        if (rcmd->mode & REDIR_HEREDOC) {
+            int pipefd[2];
+            if (pipe(pipefd) < 0) {
+                PANIC("heredoc: pipe failed");
+            }
+
+            char buf[100];
+            char delimiter[100];
+            strncpy(delimiter, rcmd->file, sizeof(delimiter) - 1);
+            delimiter[sizeof(delimiter) - 1] = '\0';
+
+            // 去除delimiter前后的空白字符
+            char *d = delimiter;
+            while (*d && (*d == ' ' || *d == '\t' || *d == '\n'))
+                d++;
+            char *e = d + strlen(d) - 1;
+            while (e > d && (*e == ' ' || *e == '\t' || *e == '\n'))
+                *e-- = '\0';
+
+            // 创建子进程来读取 heredoc 输入
+            int pid = fork1();
+            if (pid == 0) {        // 子进程负责读取输入并写入管道
+                close(pipefd[0]);  // 关闭读端
+
+                while (1) {
+                    fprintf(stderr, "> ");  // 显示提示符
+                    if (!fgets(buf, sizeof(buf), stdin)) {
+                        // 读取失败或遇到EOF
+                        break;
+                    }
+
+                    // 去除行尾的换行符
+                    char *p = strchr(buf, '\n');
+                    if (p)
+                        *p = '\0';
+
+                    if (strcmp(buf, d) == 0)
+                        break;  // 遇到分隔符，结束输入
+
+                    // 写入管道
+                    write(pipefd[1], buf, strlen(buf));
+                    write(pipefd[1], "\n", 1);
+                }
+
+                close(pipefd[1]);  // 关闭写端，发送EOF
+                exit(0);           // 子进程退出
+            } else {               // 父进程继续执行
+                close(pipefd[1]);  // 关闭写端
+
+                // 重定向标准输入到管道的读端
+                dup2(pipefd[0], 0);
+                close(pipefd[0]);
+
+                // 等待子进程完成输入
+                wait(NULL);
+
+                // 递归执行子命令
+                runcmd(rcmd->cmd);
+            }
+        } else {
+            int fd = open(rcmd->file, rcmd->mode);
+            if (fd < 0) {
+                fprintf(stderr, "open %s failed\n", rcmd->file);
+                exit(1);
+            }
+            // 使用 dup3 将文件描述符重定向到指定的 fd
+            if (dup3(fd, rcmd->fd, 0) < 0) {  // flags 设置为 0
+                fprintf(stderr, "dup3 failed\n");
+                PANIC("dup3 failed");
+            }
+
+            // 关闭不再需要的文件描述符
+            close(fd);
+
+            // 递归执行子命令
+            runcmd(rcmd->cmd);
         }
-        runcmd(rcmd->cmd);
         break;
 
     case LIST:
@@ -297,6 +370,10 @@ int gettoken(char **ps, char *es, char **q, char **eq)
     case '&':
     case '<':
         s++;
+        if (*s == '<') {
+            ret = 'h';  // heredoc
+            s++;
+        }
         break;
     case '>':
         s++;
@@ -394,10 +471,13 @@ struct cmd *parseredirs(struct cmd *cmd, char **ps, char *es)
             cmd = redircmd(cmd, q, eq, O_RDONLY, 0);
             break;
         case '>':
-            cmd = redircmd(cmd, q, eq, O_WRONLY | O_CREAT, 1);
+            cmd = redircmd(cmd, q, eq, O_WRONLY | O_CREAT | O_TRUNC, 1);
             break;
-        case '+': // >>
-            cmd = redircmd(cmd, q, eq, O_WRONLY | O_CREAT, 1);
+        case '+':  // >>
+            cmd = redircmd(cmd, q, eq, O_WRONLY | O_CREAT | O_APPEND, 1);
+            break;
+        case 'h':  // <<
+            cmd = redircmd(cmd, q, eq, O_RDONLY | REDIR_HEREDOC, 0);
             break;
         }
     }

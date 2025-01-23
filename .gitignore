@@ -70,3 +70,6 @@ Makefile
 # My own test files
 test-field/
 src/user/*/main
+*.tar
+*.zip
+field2/

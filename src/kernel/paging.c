@@ -30,7 +30,7 @@ __attribute__((unused)) void init_sections(ListNode *section_head) {
 
 #define for_list(node) for (ListNode *p = node.next; p != &node; p = p->next)
 
-__attribute__((unused)) void free_sections(struct pgdir *pd) {
+void free_sections(struct pgdir *pd) {
     printk("free_sections\n");
     for_list(pd->section_head) {
         struct section *sec = container_of(p, struct section, stnode);

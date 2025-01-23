@@ -8,6 +8,12 @@
 #include <common/string.h>
 #include <kernel/printk.h>
 
+#ifdef DEBUG
+#define printk(fmt, ...) printk(fmt, ##__VA_ARGS__)
+#else
+#define printk(fmt, ...)
+#endif
+
 #define UPALIGN(x) (((u64)x + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1))
 
 RefCount kalloc_page_cnt;

@@ -1,4 +1,5 @@
 #include <aarch64/intrinsic.h>
+#include <common/string.h>
 #include <driver/interrupt.h>
 #include <driver/uart.h>
 #include <kernel/console.h>
@@ -58,6 +59,7 @@ isize console_read(Inode *ip, char *dst, isize n) {
             }
             release_spinlock(&cons.lock);
             unalertable_wait_sem(&cons.sem);
+            acquire_spinlock(&cons.lock);
         }
         int c = cons.buf[cons.read_idx % IBUF_SIZE];
         cons.read_idx += 1;
@@ -66,8 +68,7 @@ isize console_read(Inode *ip, char *dst, isize n) {
                 cons.read_idx--;
             break;
         }
-        *dst = c;
-        dst++;
+        *dst++ = c;
         --n;
         if (c == '\n')
             break;
@@ -88,10 +89,9 @@ static ALWAYS_INLINE void clear_line() {
 #define LINES 32
 static char buf[LINES][IBUF_SIZE];  // LINES * IBUF_SIZE = PAGE_SIZE
 static int buf_idx = 0, cur_idx = 0;
-#include <common/string.h>
 
-void console_intr(char c) {
-    acquire_spinlock(&cons.lock);
+///@note Caller must hold the lock
+static ALWAYS_INLINE void intr_impl(char c) {
     switch (c) {
     case C('C'):
         // int k = kill(thisproc()->pid);
@@ -112,9 +112,9 @@ void console_intr(char c) {
             putc(BACKSPACE);
         }
         break;
+
     default:
         if (c != 0 && cons.edit_idx - cons.read_idx < IBUF_SIZE) {
-            // attention
             c = (c == '\r') ? '\n' : c;
             putc(c);
             cons.buf[cons.edit_idx++ % IBUF_SIZE] = c;
@@ -130,6 +130,11 @@ void console_intr(char c) {
         }
         break;
     }
+}
+
+void console_intr(char c) {
+    acquire_spinlock(&cons.lock);
+    intr_impl(c);
     release_spinlock(&cons.lock);
 }
 
@@ -146,12 +151,10 @@ void console_arrow_intr(char c) {
         for (int i = 0; i < IBUF_SIZE; i++) {
             if (buf[cur_idx][i] == '\n' || buf[cur_idx][i] == '\0')
                 break;
-            release_spinlock(&cons.lock);
-            console_intr(buf[cur_idx][i]);
-            acquire_spinlock(&cons.lock);
+            intr_impl(buf[cur_idx][i]);
         }
-
         break;
+
     case 'B':  // down
         if (cur_idx == buf_idx) {
             break;
@@ -161,12 +164,10 @@ void console_arrow_intr(char c) {
         for (int i = 0; i < IBUF_SIZE; i++) {
             if (buf[cur_idx][i] == '\n' || buf[cur_idx][i] == '\0')
                 break;
-            release_spinlock(&cons.lock);
-            console_intr(buf[cur_idx][i]);
-            acquire_spinlock(&cons.lock);
+            intr_impl(buf[cur_idx][i]);
         }
-
         break;
+        
     case 'C':  // right
         break;
     case 'D':  // left

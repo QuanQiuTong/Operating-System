@@ -28,7 +28,10 @@ void syscall_entry(UserContext *context) {
     ASSERT(x[8] < NR_SYSCALL);
 
     auto func = (u64(*)(u64, u64, u64, u64, u64, u64))syscall_table[x[8]];
-    ASSERT(func);
+    if(!func) {
+        printk("syscall %lld not implemented\n", x[8]);
+        PANIC();
+    }
 
     x[0] = func(x[0], x[1], x[2], x[3], x[4], x[5]);
 }

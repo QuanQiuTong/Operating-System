@@ -55,7 +55,6 @@ NO_RETURN void kernel_entry() {
     
     set_parent_to_this(p);
     start_proc(p, trap_return, 0);
-    printk("start\n");
     
     while (1) {
         yield();

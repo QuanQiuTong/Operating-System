@@ -35,10 +35,10 @@ void print_char(char c) {
         return;
     }
 
-    putchar(c);
     if (flags.show_ends && c == '\n') {
         printf("$");
     }
+    putchar(c);
 }
 
 void cat_file(int fd, const char *filename) {

@@ -237,6 +237,7 @@ define_syscall(dup3, int oldfd, int newfd, int flags) {
 }
 
 define_syscall(fcntl, int fd, int cmd, int arg) {
+    (void)arg;
     struct file *f = fd2file(fd);
     if (!f)
         return -1;

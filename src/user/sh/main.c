@@ -109,12 +109,11 @@ void runcmd(struct cmd *cmd)
                 PANIC("heredoc: pipe failed");
             }
 
-            char buf[100];
-            char delimiter[100];
+            static char buf[BUFSIZ];
+            static char delimiter[BUFSIZ];
             strncpy(delimiter, rcmd->file, sizeof(delimiter) - 1);
             delimiter[sizeof(delimiter) - 1] = '\0';
 
-            // 去除delimiter前后的空白字符
             char *d = delimiter;
             while (*d && (*d == ' ' || *d == '\t' || *d == '\n'))
                 d++;
@@ -128,21 +127,18 @@ void runcmd(struct cmd *cmd)
                 close(pipefd[0]);  // 关闭读端
 
                 while (1) {
-                    fprintf(stderr, "> ");  // 显示提示符
+                    fprintf(stderr, "> ");
                     if (!fgets(buf, sizeof(buf), stdin)) {
-                        // 读取失败或遇到EOF
                         break;
                     }
 
-                    // 去除行尾的换行符
                     char *p = strchr(buf, '\n');
                     if (p)
                         *p = '\0';
 
                     if (strcmp(buf, d) == 0)
-                        break;  // 遇到分隔符，结束输入
+                        break;
 
-                    // 写入管道
                     write(pipefd[1], buf, strlen(buf));
                     write(pipefd[1], "\n", 1);
                 }
@@ -227,7 +223,7 @@ int getcmd(char *buf, int nbuf)
 {
     fprintf(stderr, "$ ");
     memset(buf, 0, nbuf);
-    fgets(buf, nbuf, stdin);
+    fgets(buf, nbuf - 1, stdin);
     if (buf[0] == 0) // EOF
         return -1;
     return 0;
@@ -245,7 +241,7 @@ int main(int argc, char *argv[])
         printf("sh: testenv not found!\n");
     }
 
-    static char buf[100];
+    static char buf[BUFSIZ];
     int fd;
 
     // Ensure that three file descriptors are open.
